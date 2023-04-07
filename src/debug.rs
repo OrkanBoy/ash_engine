@@ -11,8 +11,8 @@ unsafe extern "system" fn vulkan_debug_callback(
     _: *mut c_void,
 ) -> vk::Bool32 {
     type Flag = vk::DebugUtilsMessageSeverityFlagsEXT;
-
-    let msg = format!("{:?} - {:?}", typ, CStr::from_ptr((*p_callback_data).p_message));
+    
+    let msg = format!("(Validation Layer): {:?} - {:?}", typ, CStr::from_ptr((*p_callback_data).p_message));
     match flag {
         Flag::VERBOSE => log::debug!("{msg}"), 
         Flag::INFO => log::info!("{msg}"), 
@@ -43,10 +43,16 @@ pub fn check_validation_layer_support(entry: &ash::Entry) {
 
 pub fn new_debug_messenger(debug_entry: &DebugUtils) -> DebugUtilsMessengerEXT {
 
-    
     let create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-        .message_severity(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING)
-        .message_type(vk::DebugUtilsMessageTypeFlagsEXT::GENERAL)
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR |
+            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING |
+            vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
+            vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE)
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL | 
+            vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION | 
+            vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE)
         .pfn_user_callback(Some(vulkan_debug_callback));
 
     unsafe { debug_entry
