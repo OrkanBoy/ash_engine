@@ -1,19 +1,18 @@
-pub mod vk_logger;
 pub mod debug;
 pub mod vertex;
 pub mod buffer;
 
-use vk_logger::VkLogger;
+use buffer::Buffer;
 use vertex::{Vertex, VERTEX_SIZE};
 
 use raw_window_handle::{
     HasRawDisplayHandle, 
     HasRawWindowHandle,
 };
-use std::ffi::{
+use std::{ffi::{
     CString, 
     CStr,
-};
+}, rc::Rc};
 
 use winit::{
     self, 
@@ -30,7 +29,7 @@ use ash::{
         AttachmentLoadOp, 
         AttachmentStoreOp, 
         CommandPoolCreateFlags, 
-        CommandBufferUsageFlags, PhysicalDeviceMemoryProperties,
+        CommandBufferUsageFlags, PhysicalDeviceMemoryProperties, BufferUsageFlags,
     },
     extensions::{
         khr::{
@@ -71,7 +70,7 @@ struct VkApp {
     debug_messenger: vk::DebugUtilsMessengerEXT, 
 
     physical_device: vk::PhysicalDevice,
-    device: ash::Device,
+    device: Rc<ash::Device>,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
@@ -96,8 +95,7 @@ struct VkApp {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
 
-    vertex_buffer: vk::Buffer,
-    vertex_buffer_memory: vk::DeviceMemory,
+    vertex_buffer: Buffer,
 
     current_frame: usize,
 }
@@ -110,51 +108,107 @@ impl VkApp {
         let instance = Self::new_instance(&entry);
 
         let surface = Surface::new(&entry, &instance);
-        let surface_khr = unsafe { ash_window::create_surface(&entry, &instance, window.raw_display_handle(), window.raw_window_handle(), None).unwrap() };
+        let surface_khr = unsafe { ash_window::create_surface(
+            &entry, 
+            &instance, 
+            window.raw_display_handle(), 
+            window.raw_window_handle(), 
+            None,
+        ).unwrap() };
         
         let debug_utils = DebugUtils::new(&entry, &instance);
-        let debug_messenger = debug::new_debug_messenger(&debug_utils);
+        let debug_messenger = debug::new_messenger(&debug_utils);
 
-        let physical_device = Self::pick_physical_device(&instance, &surface, surface_khr);
-        let (device, graphics_queue, present_queue) = Self::new_logical_device_and_queues(&instance, &surface, surface_khr, physical_device);
+        let physical_device = Self::pick_physical_device(
+            &instance, 
+            &surface, 
+            surface_khr,
+        );
 
-        let (swapchain, swapchain_khr, swapchain_images, swapchain_image_format, swapchain_extent) = Self::new_swapchain_and_images(&instance, physical_device, &device, &surface, surface_khr, vk::Extent2D{width: WIDTH, height: HEIGHT});
-        let swapchain_image_views = Self::new_swapchain_image_views(&device, &swapchain_images, swapchain_image_format);
-
-        let render_pass = Self::new_render_pass(&device, swapchain_image_format);
-
-        let (pipeline, pipeline_layout) = Self::new_pipeline(&device, swapchain_extent, render_pass);
-
-        let swapchain_framebuffers = Self::new_swapchain_framebuffers(&device, &swapchain_image_views, render_pass, swapchain_extent);
-
-        let memory_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-
-        let transient_command_pool = Self::new_command_pool(
-            vk::CommandPoolCreateFlags::TRANSIENT,
-            &device, 
+        let (device, 
+            graphics_queue, 
+            present_queue
+        ) = Self::new_logical_device_and_queues(
             &instance, 
             &surface, 
             surface_khr, 
             physical_device,
         );
-        let (vertex_buffer, vertex_buffer_memory) = Self::new_vertex_buffer(&device, &memory_props, transient_command_pool, graphics_queue); 
+
+        let (swapchain, 
+            swapchain_khr, 
+            swapchain_images, 
+            swapchain_image_format, 
+            swapchain_extent
+        ) = Self::new_swapchain_and_images(
+            &instance, 
+            physical_device, 
+            &device, 
+            &surface, 
+            surface_khr, 
+            vk::Extent2D{width: WIDTH, height: HEIGHT}
+        );
+
+        let swapchain_image_views = Self::new_swapchain_image_views(
+            &device, 
+            &swapchain_images, 
+            swapchain_image_format,
+        );
+
+        let render_pass = Self::new_render_pass(
+            &device, 
+            swapchain_image_format,
+        );
+
+        let (pipeline, pipeline_layout) = Self::new_pipeline(
+            &device, 
+            swapchain_extent, 
+            render_pass,
+        );
+
+        let swapchain_framebuffers = Self::new_swapchain_framebuffers(
+            &device, 
+            &swapchain_image_views, 
+            render_pass, 
+            swapchain_extent,
+        );
+
+        let memory_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
+        let transient_command_pool = Self::new_command_pool(
+            vk::CommandPoolCreateFlags::TRANSIENT,
+            Rc::clone(&device), 
+            &instance, 
+            &surface, 
+            surface_khr, 
+            physical_device,
+        );
+        
+        let vertex_buffer = Buffer::new_local_with_data::<u32, Vertex>(
+            &VERTICES,
+            BufferUsageFlags::TRANSFER_SRC,
+            graphics_queue,
+            transient_command_pool,
+            device.clone(),
+            &memory_props,
+        );
 
         let command_pool = Self::new_command_pool(
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            &device, 
+            Rc::clone(&device), 
             &instance, 
             &surface, 
             surface_khr, 
             physical_device,
         );
         let command_buffers = Self::new_command_buffers(
-            &device, 
+            Rc::clone(&device), 
             command_pool, 
             &swapchain_framebuffers, 
             render_pass, 
             swapchain_extent, 
             pipeline, 
-            vertex_buffer
+            vertex_buffer.handle,
         );
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) = Self::new_sync_objetcs(&device);
@@ -196,161 +250,9 @@ impl VkApp {
             in_flight_fences,
 
             vertex_buffer,
-            vertex_buffer_memory,
 
             current_frame: 0,
         }
-    }
-
-    fn new_vertex_buffer(
-        device: &ash::Device, 
-        memory_props: &vk::PhysicalDeviceMemoryProperties,
-        command_pool: vk::CommandPool,
-        transfer_queue: vk::Queue,
-    ) -> (vk::Buffer, vk::DeviceMemory) {
-        let size = VERTICES.len() as vk::DeviceSize * VERTEX_SIZE;
-        let (staging_buffer, staging_memory, staging_size) = Self::new_buffer(
-            device,
-            memory_props,
-            size, 
-            vk::BufferUsageFlags::TRANSFER_SRC, 
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
-        );
-
-        unsafe {
-            let memory_ptr = device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty()).unwrap();
-
-            let mut align = ash::util::Align::new(memory_ptr, std::mem::align_of::<u32>() as _, size);
-            align.copy_from_slice(&VERTICES);
-
-            device.unmap_memory(staging_memory);
-        }  
-
-        let (buffer, memory, _) = Self::new_buffer(
-            device,
-            memory_props,
-            size, 
-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER, 
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        );
-
-        Self::copy_buffer(
-            staging_buffer,
-            buffer,
-            size,
-            transfer_queue,
-            command_pool,
-            device,
-        );
-
-        unsafe {
-            device.free_memory(staging_memory, None);
-            device.destroy_buffer(staging_buffer, None);
-        }
-
-        (buffer, memory)
-    }
-
-    fn copy_buffer(
-        src: vk::Buffer,
-        dst: vk::Buffer,
-        size: vk::DeviceSize,
-        transfer_queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        device: &ash::Device,
-    ) {
-        let command_buffers = {
-            let info = vk::CommandBufferAllocateInfo::builder()
-                .command_buffer_count(1)
-                .command_pool(command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY);
-
-            unsafe {device.allocate_command_buffers(&info).unwrap()}
-        };
-        let command_buffer = command_buffers[0];
-
-        //begin recording
-        {
-            let begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            unsafe { device.begin_command_buffer(command_buffer, &begin_info).unwrap(); }
-        }
-
-        //copy
-        {
-            let regions = [
-                vk::BufferCopy {
-                    src_offset: 0,
-                    dst_offset: 0,
-                    size,
-                }
-            ];
-            unsafe { device.cmd_copy_buffer(command_buffer, src, dst, &regions); }
-        }
-
-
-        //end recording
-        unsafe {device.end_command_buffer(command_buffer).unwrap();}
-
-        //submit
-        {
-            let submit_infos = [
-                vk::SubmitInfo::builder()
-                    .command_buffers(&command_buffers) 
-                    .build()
-            ];
-            unsafe {
-                device.queue_submit(transfer_queue, &submit_infos, vk::Fence::null()).unwrap();
-                device.queue_wait_idle(transfer_queue).unwrap();
-            }
-        }
-
-        unsafe { device.free_command_buffers(command_pool, &command_buffers); }
-    }
-
-    fn new_buffer(
-        device: &ash::Device,
-        device_mem_props: &vk::PhysicalDeviceMemoryProperties,
-        size: vk::DeviceSize,
-        usage: vk::BufferUsageFlags,
-        mem_props: vk::MemoryPropertyFlags,
-    ) -> (vk::Buffer, vk::DeviceMemory, vk::DeviceSize) {
-        let info = vk::BufferCreateInfo::builder()
-            .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .size(size)
-            .build();
-        let buffer = unsafe {device.create_buffer(&info, None).unwrap()};
-
-        let mem_requirements = unsafe {device.get_buffer_memory_requirements(buffer) };
-        let mem_type_index = Self::find_memory_type_index(
-            mem_requirements.memory_type_bits, 
-            mem_props, 
-            &device_mem_props
-        );
-        let alloc_info = vk::MemoryAllocateInfo::builder()
-            .memory_type_index(mem_type_index)
-            .allocation_size(mem_requirements.size)
-            .build();
-        let memory = unsafe{device.allocate_memory(&alloc_info, None)}.unwrap();
-
-        unsafe { device.bind_buffer_memory(buffer, memory, 0).unwrap(); }
-
-        (buffer, memory, mem_requirements.size)
-    }
-
-    fn find_memory_type_index(
-        supported_types_mask: u32,
-        required_props: vk::MemoryPropertyFlags,
-        props: &vk::PhysicalDeviceMemoryProperties,
-        ) -> u32 {
-        for i in 0..props.memory_type_count {
-            if supported_types_mask & (1 << i) != 0 
-                && props.memory_types[i as usize].property_flags.contains(required_props) {
-                    return i;
-            }
-        }
-        panic!("Could not find suitable memory type");
     }
 
     fn renew_swapchain(&mut self) {
@@ -366,7 +268,7 @@ impl VkApp {
 
         (self.pipeline, self.pipeline_layout) = Self::new_pipeline(&self.device, self.swapchain_extent, self.render_pass);
 
-        self.command_buffers = Self::new_command_buffers(&self.device, self.command_pool, &self.swapchain_framebuffers, self.render_pass, self.swapchain_extent, self.pipeline, self.vertex_buffer);
+        self.command_buffers = Self::new_command_buffers(Rc::clone(&self.device), self.command_pool, &self.swapchain_framebuffers, self.render_pass, self.swapchain_extent, self.pipeline, self.vertex_buffer.handle);
     }
     
     fn cleanup_swapchain(&mut self) {
@@ -419,7 +321,7 @@ impl VkApp {
     }
 
     fn new_command_buffers(
-        device: &ash::Device, 
+        device: Rc<ash::Device>, 
         pool: vk::CommandPool, 
         framebuffers: &[vk::Framebuffer], 
         render_pass: vk::RenderPass, 
@@ -480,7 +382,7 @@ impl VkApp {
 
     fn new_command_pool(
         create_flags: vk::CommandPoolCreateFlags,
-        device: &ash::Device, 
+        device: Rc<ash::Device>, 
         instance: &ash::Instance,
         surface: &Surface, 
         surface_khr: vk::SurfaceKHR, 
@@ -922,7 +824,7 @@ impl VkApp {
         instance: &ash::Instance, 
         surface: &Surface,
         surface_khr: vk::SurfaceKHR,
-        physical_device: vk::PhysicalDevice) -> (ash::Device, vk::Queue, vk::Queue) {
+        physical_device: vk::PhysicalDevice) -> (Rc<ash::Device>, vk::Queue, vk::Queue) {
 
         let (graphics_family_index, present_family_index) = Self::find_queue_families(physical_device, surface, surface_khr, instance);
         let graphics_family_index = graphics_family_index.unwrap();
@@ -962,7 +864,7 @@ impl VkApp {
             let graphics_queue = device.get_device_queue(graphics_family_index, 0);
             let present_queue = device.get_device_queue(present_family_index, 0);
 
-            (device, graphics_queue, present_queue)
+            (Rc::from(device), graphics_queue, present_queue)
         }
     }
 
@@ -1069,9 +971,8 @@ impl Drop for VkApp {
         log::debug!("Dropping application...");
 
         self.cleanup_swapchain();
+        self.vertex_buffer.destroy();
         unsafe {
-            self.device.destroy_buffer(self.vertex_buffer, None);
-            self.device.free_memory(self.vertex_buffer_memory, None);
 
             for i in 0..MAX_FRAMES_IN_FLIGHT {
                 self.device.destroy_semaphore(self.image_available_semaphores[i], None);

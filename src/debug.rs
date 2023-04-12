@@ -41,7 +41,7 @@ pub fn check_validation_layer_support(entry: &ash::Entry) {
     }
 }
 
-pub fn new_debug_messenger(debug_entry: &DebugUtils) -> DebugUtilsMessengerEXT {
+pub fn new_messenger(debug_entry: &DebugUtils) -> DebugUtilsMessengerEXT {
 
     let create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
         .message_severity(

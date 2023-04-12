@@ -2,21 +2,21 @@ use ash::vk;
 
 use std::{ffi::c_void, rc::Rc};
 
-pub struct Buffer<'a> {
-    device: Rc<&'a ash::Device>,
-    handle: vk::Buffer,
-    memory: vk::DeviceMemory,
-    size: vk::DeviceSize,
-    mapped_ptr: *mut c_void,
+pub struct Buffer {
+    device: Rc<ash::Device>,
+    pub handle: vk::Buffer,
+    pub memory: vk::DeviceMemory,
+    pub size: vk::DeviceSize,
+    mapped_ptr: Option<*mut c_void>,
 }
 
-impl<'a> Buffer<'a> {
-    fn new(
+impl Buffer {
+    pub fn new(
         size: vk::DeviceSize,
         usage: vk::BufferUsageFlags,
         mem_props: vk::MemoryPropertyFlags,
-        device: &'a ash::Device,
-        device_mem_props: vk::PhysicalDeviceMemoryProperties,
+        device: Rc<ash::Device>,
+        device_mem_props: &vk::PhysicalDeviceMemoryProperties,
     ) -> Self {
         let handle = {
             let info = vk::BufferCreateInfo::builder()
@@ -43,20 +43,28 @@ impl<'a> Buffer<'a> {
 
         unsafe { device.bind_buffer_memory(handle, memory, 0).expect("Failed to associate memory with buffer"); }
 
-        let mapped_ptr = unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }.expect("Failed to obtain CPU pointer to device memory");
-
         Self {
-            device: Rc::from(device),
+            device,
             handle,
             memory,
             size,
-            mapped_ptr,
+            mapped_ptr: None,
         }
     }
 
-    fn copy_from(
+    pub fn mapped_ptr(&mut self) -> *mut c_void {
+        if let Some(ptr) = self.mapped_ptr {
+            ptr
+        } else {
+            let ptr = unsafe { self.device.map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty()) }.expect("Failed to obtain CPU pointer to device memory");
+            self.mapped_ptr = Some(ptr);
+            ptr
+        }
+    }
+
+    pub fn copy_from_buffer(
         &mut self, 
-        src: Self,
+        src: &Self,
         size: vk::DeviceSize,
         transfer_queue: vk::Queue,
         command_pool: vk::CommandPool,
@@ -110,19 +118,48 @@ impl<'a> Buffer<'a> {
         unsafe { self.device.free_command_buffers(command_pool, &command_buffers); }
     }
 
-    fn new_with_data<T>(
+    pub fn new_local_with_data<A, T: Copy>(
         data: &[T],
+        usage: vk::BufferUsageFlags,
+        transfer_queue: vk::Queue,
         command_pool: vk::CommandPool,
-    ) {
+        device: Rc<ash::Device>,
+        device_mem_props: &vk::PhysicalDeviceMemoryProperties,
+    ) -> Buffer {
+        let size = (std::mem::size_of::<T>() * data.len()) as vk::DeviceSize;
+        let mut staging_buffer = Self::new(
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            Rc::clone(&device),
+            device_mem_props,
+        );
 
-    }
+        unsafe {
+            let memory_ptr = staging_buffer.mapped_ptr();
 
-    fn new_with_data_cmd<T>(
-        data: &[T],
-        command_buffer: vk::CommandBuffer,
-        command_pool: vk::CommandPool,
-    ) {
+            let mut align = ash::util::Align::new(memory_ptr, std::mem::align_of::<u32>() as _, size);
+            align.copy_from_slice(data);
+        }
 
+        let mut buffer = Buffer::new(
+            size,
+            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL, 
+            Rc::clone(&device), 
+            device_mem_props,
+        );
+
+        buffer.copy_from_buffer(
+            &staging_buffer,
+            size,
+            transfer_queue,
+            command_pool,
+        );
+
+        staging_buffer.destroy();
+
+        buffer
     }
 
     fn find_mem_type_index(
@@ -138,12 +175,10 @@ impl<'a> Buffer<'a> {
         }
         panic!("Could not find suitable memory type");
     }
-}
 
-impl<'a> Drop for Buffer<'a> {
-    fn drop(&mut self) {
+    pub fn destroy(&mut self) {
         unsafe {
-            self.device.unmap_memory(self.memory);
+            if self.mapped_ptr.is_some() { self.device.unmap_memory(self.memory); }
             self.device.free_memory(self.memory, None);
             self.device.destroy_buffer(self.handle, None);
         }
