@@ -7,7 +7,6 @@ pub struct Buffer {
     pub handle: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub size: vk::DeviceSize,
-    mapped_ptr: Option<*mut c_void>,
 }
 
 impl Buffer {
@@ -48,17 +47,17 @@ impl Buffer {
             handle,
             memory,
             size,
-            mapped_ptr: None,
         }
     }
 
-    pub fn mapped_ptr(&mut self) -> *mut c_void {
-        if let Some(ptr) = self.mapped_ptr {
-            ptr
-        } else {
-            let ptr = unsafe { self.device.map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty()) }.expect("Failed to obtain CPU pointer to device memory");
-            self.mapped_ptr = Some(ptr);
-            ptr
+    pub fn copy_from_slice<A, T: Copy>(&mut self, slice: &[T]) {
+        unsafe {
+            let mapped_ptr = self.device.map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty()).expect("Failed to obtain CPU pointer to GPU memory");
+
+            let mut align = ash::util::Align::new(mapped_ptr, std::mem::size_of::<A>() as vk::DeviceSize, self.size);
+            align.copy_from_slice(slice);
+
+            self.device.unmap_memory(self.memory);
         }
     }
 
@@ -136,15 +135,22 @@ impl Buffer {
         );
 
         unsafe {
-            let memory_ptr = staging_buffer.mapped_ptr();
+            let mut memory_ptr = device.map_memory(
+                staging_buffer.memory, 
+                0, 
+                size, 
+                vk::MemoryMapFlags::empty()
+            ).expect("Failed to obtain CPU pointer to GPU memory");
 
-            let mut align = ash::util::Align::new(memory_ptr, std::mem::align_of::<u32>() as _, size);
+            let mut align = ash::util::Align::new(memory_ptr, std::mem::align_of::<A>() as _, size);
             align.copy_from_slice(data);
+
+            device.unmap_memory(staging_buffer.memory);
         }
 
         let mut buffer = Buffer::new(
             size,
-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+            usage | vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL, 
             Rc::clone(&device), 
             device_mem_props,
@@ -178,7 +184,6 @@ impl Buffer {
 
     pub fn destroy(&mut self) {
         unsafe {
-            if self.mapped_ptr.is_some() { self.device.unmap_memory(self.memory); }
             self.device.free_memory(self.memory, None);
             self.device.destroy_buffer(self.handle, None);
         }

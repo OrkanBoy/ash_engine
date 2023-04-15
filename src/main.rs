@@ -3,7 +3,8 @@ pub mod vertex;
 pub mod buffer;
 
 use buffer::Buffer;
-use vertex::{Vertex, VERTEX_SIZE};
+use vertex::Vertex;
+use cgmath::{Deg, Matrix4, Point3, Vector3, SquareMatrix};
 
 use raw_window_handle::{
     HasRawDisplayHandle, 
@@ -12,7 +13,7 @@ use raw_window_handle::{
 use std::{ffi::{
     CString, 
     CStr,
-}, rc::Rc};
+}, rc::Rc, time};
 
 use winit::{
     self, 
@@ -44,22 +45,28 @@ use ash::{
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
-const VERTICES: [Vertex; 3] = [
+const VERTICES: [Vertex; 4] = [
     Vertex {
-        pos: [0.0, -0.5],
-        color: [1.0, 0.0, 1.0],
+        pos: [-0.5, -0.5],
+        color: [1.0, 0.3, 0.0],
+    },
+    Vertex {
+        pos: [0.5, -0.5],
+        color: [0.0, 0.4, 0.0],
     },
     Vertex {
         pos: [0.5, 0.5],
-        color: [0.0, 1.0, 0.0],
+        color: [0.1, 0.0, 0.5],
     },
     Vertex {
         pos: [-0.5, 0.5],
-        color: [0.0, 0.0, 1.0],
+        color: [0.7, 0.0, 1.0],
     },
 ];
+const INDICES: [u16; 6] = [0, 2, 1, 0, 3, 2];
 
 struct VkApp {
+    start_instant: time::Instant,
     entry: ash::Entry,
     instance: ash::Instance,
 
@@ -84,6 +91,9 @@ struct VkApp {
 
     render_pass: vk::RenderPass,
 
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
 
@@ -96,6 +106,8 @@ struct VkApp {
     in_flight_fences: Vec<vk::Fence>,
 
     vertex_buffer: Buffer,
+    index_buffer: Buffer,
+    uniform_buffers: Vec<Buffer>,
 
     current_frame: usize,
 }
@@ -109,12 +121,12 @@ impl VkApp {
 
         let surface = Surface::new(&entry, &instance);
         let surface_khr = unsafe { ash_window::create_surface(
-            &entry, 
-            &instance, 
+            &entry,
+            &instance,
             window.raw_display_handle(), 
             window.raw_window_handle(), 
             None,
-        ).unwrap() };
+        ).expect("Failed to get acquire vulkan window handle(surface)") };
         
         let debug_utils = DebugUtils::new(&entry, &instance);
         let debug_messenger = debug::new_messenger(&debug_utils);
@@ -160,10 +172,12 @@ impl VkApp {
             swapchain_image_format,
         );
 
+        let descriptor_set_layout = Self::new_descriptor_set_layout(&device);
         let (pipeline, pipeline_layout) = Self::new_pipeline(
             &device, 
             swapchain_extent, 
             render_pass,
+            descriptor_set_layout,
         );
 
         let swapchain_framebuffers = Self::new_swapchain_framebuffers(
@@ -177,43 +191,61 @@ impl VkApp {
 
         let transient_command_pool = Self::new_command_pool(
             vk::CommandPoolCreateFlags::TRANSIENT,
-            Rc::clone(&device), 
+            device.clone(), 
             &instance, 
             &surface, 
             surface_khr, 
             physical_device,
         );
         
-        let vertex_buffer = Buffer::new_local_with_data::<u32, Vertex>(
+        let vertex_buffer = Buffer::new_local_with_data::<u32, _>(
             &VERTICES,
-            BufferUsageFlags::TRANSFER_SRC,
+            BufferUsageFlags::VERTEX_BUFFER,
             graphics_queue,
             transient_command_pool,
             device.clone(),
             &memory_props,
         );
+        let index_buffer = Buffer::new_local_with_data::<u16, _>(
+            &INDICES,
+            BufferUsageFlags::INDEX_BUFFER,
+            graphics_queue,
+            transient_command_pool,
+            device.clone(),
+            &memory_props,
+        );
+        let mut uniform_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..uniform_buffers.capacity() {
+            uniform_buffers.push(
+                Buffer::new(
+                    std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                    device.clone(),
+                    &memory_props,
+                )
+            );
+        }
+        let descriptor_pool = Self::new_descriptor_pool(&device, MAX_FRAMES_IN_FLIGHT as u32);
+        let descriptor_sets = Self::new_descriptor_sets(&device, descriptor_pool, descriptor_set_layout, &uniform_buffers);
 
         let command_pool = Self::new_command_pool(
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            Rc::clone(&device), 
+            device.clone(), 
             &instance, 
             &surface, 
             surface_khr, 
             physical_device,
         );
         let command_buffers = Self::new_command_buffers(
-            Rc::clone(&device), 
+            &device, 
             command_pool, 
-            &swapchain_framebuffers, 
-            render_pass, 
-            swapchain_extent, 
-            pipeline, 
-            vertex_buffer.handle,
         );
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) = Self::new_sync_objetcs(&device);
 
         Self {
+            start_instant: time::Instant::now(),
             entry,
             instance,
 
@@ -238,6 +270,9 @@ impl VkApp {
 
             render_pass,
 
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_sets,
             pipeline_layout,
             pipeline,
 
@@ -250,9 +285,79 @@ impl VkApp {
             in_flight_fences,
 
             vertex_buffer,
+            index_buffer,
+            uniform_buffers,
 
             current_frame: 0,
         }
+    }
+
+    fn new_descriptor_pool(device: &ash::Device, size: u32) -> vk::DescriptorPool {
+        let pool_size = vk::DescriptorPoolSize::builder()
+            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(size)
+            .build();
+        let pool_sizes = [pool_size];
+
+        let info = vk::DescriptorPoolCreateInfo::builder()
+            .max_sets(size)
+            .pool_sizes(&pool_sizes);
+
+        unsafe { device.create_descriptor_pool(&info, None).expect("Failed to create descriptor pool") }
+    }
+
+    fn new_descriptor_sets(
+        device: &ash::Device,
+        pool: vk::DescriptorPool,
+        layout: vk::DescriptorSetLayout,
+        uniform_buffers: &[Buffer],
+    ) -> Vec<vk::DescriptorSet> {
+        let layouts = (0..uniform_buffers.len())
+            .map(|_| layout)
+            .collect::<Vec<_>>();
+        let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(pool)
+            .set_layouts(&layouts);
+        let sets = unsafe {
+            device.allocate_descriptor_sets(&alloc_info).expect("Failed to create descriptor sets")
+        };
+
+        for (set, buffer) in sets.iter().zip(uniform_buffers.iter()) {
+            let buffer_info = vk::DescriptorBufferInfo::builder()
+                .buffer(buffer.handle)
+                .offset(0)
+                .range(std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize)
+                .build();
+            let buffer_infos = [buffer_info];
+
+            let write = vk::WriteDescriptorSet::builder()
+                .dst_set(*set)
+                .dst_array_element(0)
+                .dst_binding(0)
+                .buffer_info(&buffer_infos)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .build();
+            let writes = [write];
+
+            unsafe { device.update_descriptor_sets(&writes, &[]) }
+        }
+        sets
+    }
+
+    fn new_descriptor_set_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_count(1)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
+        ];
+
+        let info = vk::DescriptorSetLayoutCreateInfo::builder()
+            .bindings(&bindings);
+
+        unsafe { device.create_descriptor_set_layout(&info, None).expect("Failed to create descriptor set layouts") }
     }
 
     fn renew_swapchain(&mut self) {
@@ -265,31 +370,19 @@ impl VkApp {
         self.swapchain_image_views = Self::new_swapchain_image_views(&self.device, &self.swapchain_images, self.swapchain_image_format);
 
         self.swapchain_framebuffers = Self::new_swapchain_framebuffers(&self.device, &self.swapchain_image_views, self.render_pass, self.swapchain_extent);
-
-        (self.pipeline, self.pipeline_layout) = Self::new_pipeline(&self.device, self.swapchain_extent, self.render_pass);
-
-        self.command_buffers = Self::new_command_buffers(Rc::clone(&self.device), self.command_pool, &self.swapchain_framebuffers, self.render_pass, self.swapchain_extent, self.pipeline, self.vertex_buffer.handle);
     }
     
     fn cleanup_swapchain(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
 
-            self.device.free_command_buffers(self.command_pool, &self.command_buffers);
-
-            self.device.destroy_pipeline(self.pipeline, None);
-
-            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
-        }
-
-        for i in 0..self.swapchain_images.len() {
-            unsafe {
+            for i in 0..self.swapchain_images.len() {
                 self.device.destroy_framebuffer(self.swapchain_framebuffers[i], None);
                 self.device.destroy_image_view(self.swapchain_image_views[i], None);
             }
-        }
 
-        unsafe { self.swapchain.destroy_swapchain(self.swapchain_khr, None); }
+            self.swapchain.destroy_swapchain(self.swapchain_khr, None);
+        }
     }
 
     fn new_sync_objetcs(device: &ash::Device
@@ -321,63 +414,16 @@ impl VkApp {
     }
 
     fn new_command_buffers(
-        device: Rc<ash::Device>, 
-        pool: vk::CommandPool, 
-        framebuffers: &[vk::Framebuffer], 
-        render_pass: vk::RenderPass, 
-        extent: vk::Extent2D, 
-        pipeline: vk::Pipeline,
-        vertex_buffer: vk::Buffer,
+        device: &ash::Device, 
+        pool: vk::CommandPool,
     ) -> Vec<vk::CommandBuffer> {
         //allocate command command_buffers
         let alloc_info = vk::CommandBufferAllocateInfo::builder()
             .command_pool(pool)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(framebuffers.len() as _);
+            .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
 
-        let command_buffers = unsafe { device.allocate_command_buffers(&alloc_info).unwrap() };
-
-        //record command command_buffers
-        for (&command_buffer, &framebuffer) in command_buffers.iter().zip(framebuffers.iter()) {
-            let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(CommandBufferUsageFlags::SIMULTANEOUS_USE);
-
-            let render_pass_clear_values = [vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
-            }];
-
-            let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
-                .clear_values(&render_pass_clear_values)
-                .render_pass(render_pass)
-                .framebuffer(framebuffer)
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D{x: 0, y: 0},
-                    extent,
-                }
-            );
-
-            unsafe { 
-                device.begin_command_buffer(command_buffer, &command_buffer_begin_info).unwrap();
-
-                device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE); 
-
-                device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
-
-                let vertex_buffers = [vertex_buffer];
-                let offsets = [0];
-
-                device.cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &offsets);
-                
-                device.cmd_draw(command_buffer, 3, 1, 0, 0);
-
-                device.cmd_end_render_pass(command_buffer);
-
-                device.end_command_buffer(command_buffer).unwrap();
-            }
-        }
-        command_buffers
+        unsafe { device.allocate_command_buffers(&alloc_info).unwrap() }
     }
 
     fn new_command_pool(
@@ -394,7 +440,7 @@ impl VkApp {
             .queue_family_index(graphics.unwrap())
             .flags(create_flags);
 
-        unsafe { device.create_command_pool(&info, None).unwrap() }
+        unsafe { device.create_command_pool(&info, None).expect("Failed to create command pool") }
     }
 
     fn new_swapchain_framebuffers(
@@ -462,14 +508,24 @@ impl VkApp {
             .dependencies(&subpass_deps)
             .attachments(&attachment_descs);
 
-        unsafe { device.create_render_pass(&info, None).unwrap() }
+        unsafe { device.create_render_pass(&info, None).expect("Failed to create render procedure(renderpass), setup color attachments and sub procedure(subpass) dependencies") }
     }
 
     fn new_pipeline(
         device: &ash::Device,
         swapchain_extent: vk::Extent2D,
         render_pass: vk::RenderPass,
+        descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> (vk::Pipeline, vk::PipelineLayout) {
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+        ];
+
+        let dynamic_state_info = vk::PipelineDynamicStateCreateInfo::builder()
+            .dynamic_states(&dynamic_states)
+            .build();
+
         let vert_code = vk_shader_macros::include_glsl!("shaders/foo.vert");
         let frag_code = vk_shader_macros::include_glsl!("shaders/foo.frag");
 
@@ -525,7 +581,7 @@ impl VkApp {
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
             .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::CLOCKWISE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(false)
             .depth_bias_constant_factor(0.0)
             .depth_bias_clamp(0.0)
@@ -560,10 +616,12 @@ impl VkApp {
             .blend_constants([0.0, 0.0, 0.0, 0.0])
             .build();
 
+        let descriptor_set_layouts = [descriptor_set_layout];
         let layout = {
-            let layout_info = vk::PipelineLayoutCreateInfo::builder();
-                // .set_layouts() null since we don't have uniforms in our shaders
+            let layout_info = vk::PipelineLayoutCreateInfo::builder()
+                .set_layouts(&descriptor_set_layouts);
                 // .push_constant_ranges
+
 
             unsafe {
                 device
@@ -573,6 +631,7 @@ impl VkApp {
         };
 
         let info = vk::GraphicsPipelineCreateInfo::builder()
+            .dynamic_state(&dynamic_state_info)
             .stages(&shader_stage_infos)
             .vertex_input_state(&vertex_input_create_info)
             .input_assembly_state(&input_assembly_create_info)
@@ -824,7 +883,8 @@ impl VkApp {
         instance: &ash::Instance, 
         surface: &Surface,
         surface_khr: vk::SurfaceKHR,
-        physical_device: vk::PhysicalDevice) -> (Rc<ash::Device>, vk::Queue, vk::Queue) {
+        physical_device: vk::PhysicalDevice
+    ) -> (Rc<ash::Device>, vk::Queue, vk::Queue) {
 
         let (graphics_family_index, present_family_index) = Self::find_queue_families(physical_device, surface, surface_khr, instance);
         let graphics_family_index = graphics_family_index.unwrap();
@@ -898,12 +958,104 @@ impl VkApp {
         (c_device_extension_names, device_extension_name_ptrs)
     }
 
+    fn update_uniform_buffer(&mut self) {
+        let elapsed = self.start_instant.elapsed().as_secs_f32();
+
+        let (s, c) = f32::sin_cos(elapsed);
+        let ubo = UniformBufferObject {
+            model: Matrix4::new( //camera model inverse
+                c, s, 0.0, 0.0,
+                -s, c, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ),
+            view: Matrix4::identity(),
+            proj: Matrix4::new(
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ),
+        };
+        let ubos = [ubo];
+
+        self.uniform_buffers[self.current_frame].copy_from_slice::<f32, _>(&ubos);
+    }
+
+    fn record_command_buffer(
+        &mut self, 
+        command_buffer: vk::CommandBuffer,
+        image_index: usize,
+    ) {
+        let begin_info = vk::CommandBufferBeginInfo::default();
+        
+        let render_area = vk::Rect2D {
+            offset: vk::Offset2D{
+                x: 0, y: 0,
+            },
+            extent: self.swapchain_extent,
+        };
+
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                }
+            }
+        ];
+        
+        let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
+            .render_pass(self.render_pass)
+            .framebuffer(self.swapchain_framebuffers[image_index])
+            .render_area(render_area)
+            .clear_values(&clear_values);
+        
+        let viewport = vk::Viewport {
+            x: 0.0, 
+            y: 0.0,
+            width: self.swapchain_extent.width as f32, 
+            height: self.swapchain_extent.height as f32,
+            min_depth: 0.0, 
+            max_depth: 0.0, 
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D {
+                x: 0,
+                y: 0,
+            },
+            extent: self.swapchain_extent,
+        };
+
+        unsafe { 
+            self.device.begin_command_buffer(command_buffer, &begin_info).unwrap();
+
+            self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
+
+            self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+
+            self.device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+            self.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+
+            self.device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.vertex_buffer.handle], &[0]);
+            self.device.cmd_bind_index_buffer(command_buffer, self.index_buffer.handle, 0, vk::IndexType::UINT16);
+            self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &self.descriptor_sets[image_index..=image_index], &[]);
+
+            self.device.cmd_draw_indexed(command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
+
+            self.device.cmd_end_render_pass(command_buffer);
+
+            self.device.end_command_buffer(command_buffer).unwrap();
+        }
+        
+    }
+
     fn draw_frame(&mut self) -> bool {
         log::trace!("Drawing frame...");
 
         let image_available_semaphore = self.image_available_semaphores[self.current_frame];
         let render_finished_semaphore = self.render_finished_semaphores[self.current_frame];
         let in_flight_fence = self.in_flight_fences[self.current_frame];
+        let command_buffer = self.command_buffers[self.current_frame];
 
         let wait_fences = [in_flight_fence];
         unsafe { 
@@ -924,13 +1076,18 @@ impl VkApp {
             }
         };
 
+        unsafe { self.device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty()).unwrap(); }
+        self.record_command_buffer(command_buffer, image_index as usize);
+
+        self.update_uniform_buffer();
+
         let wait_semaphores = [image_available_semaphore];
         let signal_semaphores = [render_finished_semaphore];
 
         //render
         {
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let command_buffers = [self.command_buffers[image_index as usize]];
+            let command_buffers = [command_buffer];
             let render_info = vk::SubmitInfo::builder()
                 .command_buffers(&command_buffers)
                 .wait_dst_stage_mask(&wait_stages)
@@ -971,8 +1128,18 @@ impl Drop for VkApp {
         log::debug!("Dropping application...");
 
         self.cleanup_swapchain();
+
         self.vertex_buffer.destroy();
+        self.index_buffer.destroy();
+        for ub in self.uniform_buffers.iter_mut() { ub.destroy(); }
+
         unsafe {
+            self.device.destroy_descriptor_pool(self.descriptor_pool, None);
+
+            self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
 
             for i in 0..MAX_FRAMES_IN_FLIGHT {
                 self.device.destroy_semaphore(self.image_available_semaphores[i], None);
@@ -1016,8 +1183,12 @@ fn main() {
     event_loop.run(move |system_event, _, control_flow| {
         match system_event {
             Event::MainEventsCleared => {
-                if dirty_swapchain && app.swapchain_extent.width > 0 && app.swapchain_extent.height > 0 {
-                    app.renew_swapchain();
+                if dirty_swapchain {
+                    if app.swapchain_extent.width > 0 && app.swapchain_extent.height > 0 {
+                        app.renew_swapchain();
+                    } else {
+                        return;
+                    }
                 }
                 dirty_swapchain = app.draw_frame();
             }
@@ -1032,4 +1203,12 @@ fn main() {
             _ => {},
         }
     })
+}
+
+//TODO: update to projective geometric algebra
+#[derive(Clone, Copy)]
+struct UniformBufferObject {
+    model: Matrix4<f32>,
+    view: Matrix4<f32>,
+    proj: Matrix4<f32>
 }
