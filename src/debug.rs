@@ -62,14 +62,14 @@ pub fn new_messenger(debug_entry: &DebugUtils) -> DebugUtilsMessengerEXT {
 }
 
     //Return CString to avoid dangling ptrs
-pub fn get_c_layer_names_and_ptrs() -> (Vec<CString>, Vec<*const i8>) {
-    let c_layer_names = LAYER_NAMES
+pub fn get_layer_names_and_ptrs() -> (Vec<CString>, Vec<*const i8>) {
+    let layer_names = LAYER_NAMES
         .iter()
         .map(|name| CString::new(*name).expect("Failed to build CString"))
         .collect::<Vec<_>>();
-    let layer_names_ptrs = c_layer_names
+    let layer_names_ptrs = layer_names
         .iter()
         .map(|name| name.as_ptr())
         .collect::<Vec<_>>();
-    (c_layer_names, layer_names_ptrs)
+    (layer_names, layer_names_ptrs)
 }

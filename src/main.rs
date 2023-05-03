@@ -1,10 +1,13 @@
 pub mod debug;
 pub mod vertex;
 pub mod buffer;
+pub mod texture;
+pub mod math;
 
 use buffer::Buffer;
 use vertex::Vertex;
-use cgmath::{Deg, Matrix4, Point3, Vector3, SquareMatrix};
+use texture::Texture;
+use cgmath::{Deg, Matrix4, Matrix3, Point3, Vector3, SquareMatrix};
 
 use raw_window_handle::{
     HasRawDisplayHandle, 
@@ -13,14 +16,14 @@ use raw_window_handle::{
 use std::{ffi::{
     CString, 
     CStr,
-}, rc::Rc, time};
+}, rc::Rc, time, f32::consts::{FRAC_PI_2, FRAC_PI_3}};
 
 use winit::{
     self, 
     event_loop::EventLoop, 
     window::WindowBuilder, 
     dpi::PhysicalSize, 
-    event::WindowEvent
+    event::{WindowEvent, VirtualKeyCode, ElementState}
 };
 
 use ash::{
@@ -47,25 +50,28 @@ const HEIGHT: u32 = 600;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 const VERTICES: [Vertex; 4] = [
     Vertex {
-        pos: [-0.5, -0.5],
-        color: [1.0, 0.3, 0.0],
+        pos: [-0.5, 0.0, -0.5],
+        color: [1.0, 0.0, 0.0],
     },
     Vertex {
-        pos: [0.5, -0.5],
-        color: [0.0, 0.4, 0.0],
+        pos: [0.5, 0.0, -0.5],
+        color: [0.0, 1.0, 1.0],
     },
     Vertex {
-        pos: [0.5, 0.5],
-        color: [0.1, 0.0, 0.5],
+        pos: [0.5, 0.0, 0.5],
+        color: [0.0, 0.0, 1.0],
     },
     Vertex {
-        pos: [-0.5, 0.5],
-        color: [0.7, 0.0, 1.0],
+        pos: [-0.5, 0.0, 0.5],
+        color: [0.0, 1.0, 0.0],
     },
 ];
-const INDICES: [u16; 6] = [0, 2, 1, 0, 3, 2];
+const INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
+
 
 struct VkApp {
+    camera: Camera,
+
     start_instant: time::Instant,
     entry: ash::Entry,
     instance: ash::Instance,
@@ -244,7 +250,21 @@ impl VkApp {
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) = Self::new_sync_objetcs(&device);
 
+        let texture_image = Self::new_texture_image();
+
+        let camera = Camera {
+            x: 0.0, y: 0.0, z: 0.0,
+            x_z_angle: 0.0,
+            xz_y_angle: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            scale_z: 10.0,
+            near_z: 1.0,
+        };
+
         Self {
+            camera,
+
             start_instant: time::Instant::now(),
             entry,
             instance,
@@ -290,6 +310,10 @@ impl VkApp {
 
             current_frame: 0,
         }
+    }
+
+    fn new_texture_image() {
+        let _image = image::open("images/mogus.jpg");
     }
 
     fn new_descriptor_pool(device: &ash::Device, size: u32) -> vk::DescriptorPool {
@@ -391,9 +415,9 @@ impl VkApp {
         Vec<vk::Semaphore>,
         Vec<vk::Fence>,
     ) {
-        let mut image_available_semaphores = vec![];
-        let mut render_finished_semaphores = vec![];
-        let mut in_flight_fences = vec![];
+        let mut image_available_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut in_flight_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             image_available_semaphores.push({
@@ -812,7 +836,7 @@ impl VkApp {
             #[cfg(debug_assertions)] 
             DebugUtils::name().as_ptr()
         ];
-        let (_, layer_name_ptrs) = &debug::get_c_layer_names_and_ptrs();
+        let (_, layer_name_ptrs) = &debug::get_layer_names_and_ptrs();
 
         let mut info = vk::InstanceCreateInfo::builder()
             .application_info(&app_info)
@@ -903,10 +927,10 @@ impl VkApp {
             .collect::<Vec<_>>()
         };
 
-        let (_, layer_name_ptrs) = &debug::get_c_layer_names_and_ptrs();
+        let (_, layer_name_ptrs) = &debug::get_layer_names_and_ptrs();
 
         let physical_device_features = vk::PhysicalDeviceFeatures::builder();
-        let (_, device_extension_name_ptrs) = &Self::get_c_device_extension_names_and_ptrs();
+        let (_, device_extension_name_ptrs) = &Self::get_device_extension_names_and_ptrs();
 
         Self::check_device_extension_support(&instance, physical_device);
 
@@ -929,7 +953,7 @@ impl VkApp {
     }
 
     fn check_device_extension_support(instance: &ash::Instance, physical_device: vk::PhysicalDevice) {
-        let (required_extensions, _) = &Self::get_c_device_extension_names_and_ptrs();
+        let (required_extensions, _) = &Self::get_device_extension_names_and_ptrs();
 
         let extension_props = unsafe {
             instance
@@ -949,7 +973,7 @@ impl VkApp {
         }
     }
 
-    fn get_c_device_extension_names_and_ptrs() -> (Vec<&'static CStr>, Vec<*const i8>) {
+    fn get_device_extension_names_and_ptrs() -> (Vec<&'static CStr>, Vec<*const i8>) {
         let c_device_extension_names = vec![Swapchain::name()];
         let device_extension_name_ptrs = c_device_extension_names.iter()
             .map(|name| name.as_ptr())
@@ -961,20 +985,22 @@ impl VkApp {
     fn update_uniform_buffer(&mut self) {
         let elapsed = self.start_instant.elapsed().as_secs_f32();
 
-        let (s, c) = f32::sin_cos(elapsed);
+        let aspect_ratio = self.swapchain_extent.height as f32 / self.swapchain_extent.width as f32;
+
+        let mut view = math::inverse_rigid_mat(self.camera.x_z_angle, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0);
+        let angle = self.camera.x_z_angle + FRAC_PI_2;
+        let axis: Vector3<f32> = Vector3::new(angle.cos(), 0.0, angle.sin()).cross(Vector3::new(0.0, 1.0, 0.0));
+        view = view * math::inverse_rigid_mat(self.camera.xz_y_angle, axis.x, axis.y, axis.z, self.camera.x, self.camera.y, self.camera.z);
+        
         let ubo = UniformBufferObject {
-            model: Matrix4::new( //camera model inverse
-                c, s, 0.0, 0.0,
-                -s, c, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
-            ),
-            view: Matrix4::identity(),
-            proj: Matrix4::new(
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+            model: math::rigid_mat(1.04, 1.0, 0.0, 0.0, 0.0, 0.0, 6.0),
+            view,
+            proj: math::proj_mat(
+                aspect_ratio,
+                self.camera.scale_x,
+                self.camera.scale_y,
+                self.camera.scale_z,
+                self.camera.near_z,
             ),
         };
         let ubos = [ubo];
@@ -1038,7 +1064,11 @@ impl VkApp {
 
             self.device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.vertex_buffer.handle], &[0]);
             self.device.cmd_bind_index_buffer(command_buffer, self.index_buffer.handle, 0, vk::IndexType::UINT16);
-            self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &self.descriptor_sets[image_index..=image_index], &[]);
+            self.device.cmd_bind_descriptor_sets(
+                command_buffer, 
+                vk::PipelineBindPoint::GRAPHICS, 
+                self.pipeline_layout, 
+                0, &self.descriptor_sets[self.current_frame..=self.current_frame], &[]);
 
             self.device.cmd_draw_indexed(command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
 
@@ -1166,6 +1196,7 @@ impl Drop for VkApp {
 
 fn main() {
     env_logger::init();
+    
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
@@ -1193,14 +1224,41 @@ fn main() {
                 dirty_swapchain = app.draw_frame();
             }
             Event::WindowEvent { event, .. } => match event {
+                WindowEvent::KeyboardInput { input, .. } => {
+                    if input.virtual_keycode.is_none() {
+                        return;
+                    }
+                    match input.virtual_keycode.unwrap() {
+                        VirtualKeyCode::W => {
+                            app.camera.x += 0.1 * app.camera.x_z_angle.sin();
+                            app.camera.z += 0.1 * app.camera.x_z_angle.cos();
+                        } 
+                        VirtualKeyCode::S => {
+                            app.camera.x -= 0.1 * app.camera.x_z_angle.sin();
+                            app.camera.z -= 0.1 * app.camera.x_z_angle.cos();
+                        }
+                        VirtualKeyCode::D => {
+                            app.camera.x += 0.1 * app.camera.x_z_angle.cos();
+                            app.camera.z += 0.1 * app.camera.x_z_angle.sin();
+                        } 
+                        VirtualKeyCode::A => {
+                            app.camera.x -= 0.1 * app.camera.x_z_angle.cos();
+                            app.camera.z -= 0.1 * app.camera.x_z_angle.sin();
+                        }
+                        _ => {}
+                    }
+                }
+                WindowEvent::MouseInput {state, .. } => {
+
+                }
                 WindowEvent::Resized(PhysicalSize {width, height}) => {
                     dirty_swapchain = true;
                     app.swapchain_extent = vk::Extent2D {width, height};
                 }
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                _ => {},
+                _ => {}
             } 
-            _ => {},
+            _ => {}
         }
     })
 }
@@ -1212,3 +1270,20 @@ struct UniformBufferObject {
     view: Matrix4<f32>,
     proj: Matrix4<f32>
 }
+
+struct Camera {
+    x: f32,
+    y: f32,
+    z: f32,
+    x_z_angle: f32,
+    xz_y_angle: f32,
+
+    scale_x: f32,
+    scale_y: f32,
+    scale_z: f32,
+    near_z: f32,
+}
+
+
+
+

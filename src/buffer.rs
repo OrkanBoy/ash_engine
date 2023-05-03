@@ -135,7 +135,7 @@ impl Buffer {
         );
 
         unsafe {
-            let mut memory_ptr = device.map_memory(
+            let memory_ptr = device.map_memory(
                 staging_buffer.memory, 
                 0, 
                 size, 
