@@ -1,22 +1,28 @@
 use ash::vk;
+use std::{
+    marker::PhantomData,
+    rc::Rc,
+};
 
-use std::{ffi::c_void, rc::Rc};
-
-pub struct Buffer {
+pub struct Buffer<T: Copy> {
     device: Rc<ash::Device>,
     pub handle: vk::Buffer,
     pub memory: vk::DeviceMemory,
-    pub size: vk::DeviceSize,
+    size: vk::DeviceSize,
+    size_of_t: vk::DeviceSize,
+    phantom: PhantomData<T>,
 }
 
-impl Buffer {
+impl<T: Copy> Buffer<T> {
     pub fn new(
-        size: vk::DeviceSize,
+        count: usize,
         usage: vk::BufferUsageFlags,
         mem_props: vk::MemoryPropertyFlags,
         device: Rc<ash::Device>,
         device_mem_props: &vk::PhysicalDeviceMemoryProperties,
     ) -> Self {
+        let size_of_t = std::mem::size_of::<T>() as vk::DeviceSize;
+        let size = size_of_t * count as vk::DeviceSize;
         let handle = {
             let info = vk::BufferCreateInfo::builder()
                 .size(size)
@@ -47,12 +53,19 @@ impl Buffer {
             handle,
             memory,
             size,
+            size_of_t,
+            phantom: PhantomData,
         }
     }
 
-    pub fn copy_from_slice<A, T: Copy>(&mut self, slice: &[T]) {
+    pub fn copy_from_slice<A>(&mut self, slice: &[T], start_index: usize) {
         unsafe {
-            let mapped_ptr = self.device.map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty()).expect("Failed to obtain CPU pointer to GPU memory");
+            let mapped_ptr = self.device.map_memory(
+                self.memory, 
+                self.size_of_t * start_index as vk::DeviceSize, 
+                self.size_of_t * slice.len() as vk::DeviceSize, 
+                vk::MemoryMapFlags::empty()
+            ).expect("Failed to obtain CPU pointer to GPU memory");
 
             let mut align = ash::util::Align::new(mapped_ptr, std::mem::size_of::<A>() as vk::DeviceSize, self.size);
             align.copy_from_slice(slice);
@@ -64,7 +77,7 @@ impl Buffer {
     pub fn copy_from_buffer(
         &mut self, 
         src: &Self,
-        size: vk::DeviceSize,
+        count: usize,
         transfer_queue: vk::Queue,
         command_pool: vk::CommandPool,
     ) {
@@ -91,7 +104,7 @@ impl Buffer {
                 vk::BufferCopy {
                     src_offset: 0,
                     dst_offset: 0,
-                    size,
+                    size: self.size_of_t * count as vk::DeviceSize,
                 }
             ];
             unsafe { self.device.cmd_copy_buffer(command_buffer, src.handle, self.handle, &regions); }
@@ -117,17 +130,16 @@ impl Buffer {
         unsafe { self.device.free_command_buffers(command_pool, &command_buffers); }
     }
 
-    pub fn new_local_with_data<A, T: Copy>(
+    pub fn new_local_with_data<A>(
         data: &[T],
         usage: vk::BufferUsageFlags,
         transfer_queue: vk::Queue,
         command_pool: vk::CommandPool,
         device: Rc<ash::Device>,
         device_mem_props: &vk::PhysicalDeviceMemoryProperties,
-    ) -> Buffer {
-        let size = (std::mem::size_of::<T>() * data.len()) as vk::DeviceSize;
+    ) -> Buffer<T> {
         let mut staging_buffer = Self::new(
-            size,
+            data.len(),
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             Rc::clone(&device),
@@ -138,18 +150,18 @@ impl Buffer {
             let memory_ptr = device.map_memory(
                 staging_buffer.memory, 
                 0, 
-                size, 
+                staging_buffer.size, 
                 vk::MemoryMapFlags::empty()
             ).expect("Failed to obtain CPU pointer to GPU memory");
 
-            let mut align = ash::util::Align::new(memory_ptr, std::mem::align_of::<A>() as _, size);
+            let mut align = ash::util::Align::new(memory_ptr, std::mem::align_of::<A>() as _, staging_buffer.size);
             align.copy_from_slice(data);
 
             device.unmap_memory(staging_buffer.memory);
         }
 
         let mut buffer = Buffer::new(
-            size,
+            data.len(),
             usage | vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL, 
             Rc::clone(&device), 
@@ -158,7 +170,7 @@ impl Buffer {
 
         buffer.copy_from_buffer(
             &staging_buffer,
-            size,
+            data.len(),
             transfer_queue,
             command_pool,
         );

@@ -63,6 +63,9 @@ pub fn rigid_mat(
 
 //avoid general matrix inverse algoirthm
 //(T * R)^-1 = R^t * T^-1
+
+
+
 pub fn inverse_rigid_mat(
     t: f32, 
     a: f32, 

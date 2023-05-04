@@ -99,7 +99,7 @@ struct VkApp {
 
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
-    descriptor_sets: Vec<vk::DescriptorSet>,
+    descriptor_set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
 
@@ -111,9 +111,9 @@ struct VkApp {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
 
-    vertex_buffer: Buffer,
-    index_buffer: Buffer,
-    uniform_buffers: Vec<Buffer>,
+    vertex_buffer: Buffer<Vertex>,
+    index_buffer: Buffer<u16>,
+    uniform_buffer: Buffer<UniformBufferObject>,
 
     current_frame: usize,
 }
@@ -204,7 +204,7 @@ impl VkApp {
             physical_device,
         );
         
-        let vertex_buffer = Buffer::new_local_with_data::<u32, _>(
+        let vertex_buffer = Buffer::new_local_with_data::<u32>(
             &VERTICES,
             BufferUsageFlags::VERTEX_BUFFER,
             graphics_queue,
@@ -212,7 +212,7 @@ impl VkApp {
             device.clone(),
             &memory_props,
         );
-        let index_buffer = Buffer::new_local_with_data::<u16, _>(
+        let index_buffer = Buffer::new_local_with_data::<u16>(
             &INDICES,
             BufferUsageFlags::INDEX_BUFFER,
             graphics_queue,
@@ -220,20 +220,15 @@ impl VkApp {
             device.clone(),
             &memory_props,
         );
-        let mut uniform_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for _ in 0..uniform_buffers.capacity() {
-            uniform_buffers.push(
-                Buffer::new(
-                    std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize,
-                    vk::BufferUsageFlags::UNIFORM_BUFFER,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                    device.clone(),
-                    &memory_props,
-                )
-            );
-        }
-        let descriptor_pool = Self::new_descriptor_pool(&device, MAX_FRAMES_IN_FLIGHT as u32);
-        let descriptor_sets = Self::new_descriptor_sets(&device, descriptor_pool, descriptor_set_layout, &uniform_buffers);
+        let mut uniform_buffer = Buffer::new(
+            MAX_FRAMES_IN_FLIGHT,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            device.clone(),
+            &memory_props,
+        );
+        let descriptor_pool = Self::new_descriptor_pool(&device, MAX_FRAMES_IN_FLIGHT);
+        let descriptor_set = Self::new_descriptor_set(&device, descriptor_pool, descriptor_set_layout, &uniform_buffer);
 
         let command_pool = Self::new_command_pool(
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
@@ -249,8 +244,6 @@ impl VkApp {
         );
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) = Self::new_sync_objetcs(&device);
-
-        let texture_image = Self::new_texture_image();
 
         let camera = Camera {
             x: 0.0, y: 0.0, z: 0.0,
@@ -292,7 +285,7 @@ impl VkApp {
 
             descriptor_set_layout,
             descriptor_pool,
-            descriptor_sets,
+            descriptor_set,
             pipeline_layout,
             pipeline,
 
@@ -306,17 +299,15 @@ impl VkApp {
 
             vertex_buffer,
             index_buffer,
-            uniform_buffers,
+            uniform_buffer,
 
             current_frame: 0,
         }
     }
 
-    fn new_texture_image() {
-        let _image = image::open("images/mogus.jpg");
-    }
+    fn new_descriptor_pool(device: &ash::Device, size: usize) -> vk::DescriptorPool {
+        let size = size as u32;
 
-    fn new_descriptor_pool(device: &ash::Device, size: u32) -> vk::DescriptorPool {
         let pool_size = vk::DescriptorPoolSize::builder()
             .ty(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(size)
@@ -330,42 +321,39 @@ impl VkApp {
         unsafe { device.create_descriptor_pool(&info, None).expect("Failed to create descriptor pool") }
     }
 
-    fn new_descriptor_sets(
+    fn new_descriptor_set(
         device: &ash::Device,
         pool: vk::DescriptorPool,
         layout: vk::DescriptorSetLayout,
-        uniform_buffers: &[Buffer],
-    ) -> Vec<vk::DescriptorSet> {
-        let layouts = (0..uniform_buffers.len())
-            .map(|_| layout)
-            .collect::<Vec<_>>();
+        uniform_buffer: &Buffer<UniformBufferObject>,
+    ) -> vk::DescriptorSet {
+        let layouts = [layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(pool)
             .set_layouts(&layouts);
-        let sets = unsafe {
-            device.allocate_descriptor_sets(&alloc_info).expect("Failed to create descriptor sets")
+        let set = unsafe {
+            device.allocate_descriptor_sets(&alloc_info)
+                .expect("Failed to allocate descriptor sets")[0]
         };
 
-        for (set, buffer) in sets.iter().zip(uniform_buffers.iter()) {
-            let buffer_info = vk::DescriptorBufferInfo::builder()
-                .buffer(buffer.handle)
+        let buffer_info = vk::DescriptorBufferInfo::builder()
+                .buffer(uniform_buffer.handle)
                 .offset(0)
                 .range(std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize)
                 .build();
-            let buffer_infos = [buffer_info];
+        let buffer_infos = [buffer_info];
 
-            let write = vk::WriteDescriptorSet::builder()
-                .dst_set(*set)
-                .dst_array_element(0)
-                .dst_binding(0)
-                .buffer_info(&buffer_infos)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .build();
-            let writes = [write];
+        let write = vk::WriteDescriptorSet::builder()
+            .dst_set(set)
+            .dst_array_element(0)
+            .dst_binding(0)
+            .buffer_info(&buffer_infos)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .build();
+        let writes = [write];
 
-            unsafe { device.update_descriptor_sets(&writes, &[]) }
-        }
-        sets
+        unsafe { device.update_descriptor_sets(&writes, &[]) }
+        set
     }
 
     fn new_descriptor_set_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
@@ -532,7 +520,10 @@ impl VkApp {
             .dependencies(&subpass_deps)
             .attachments(&attachment_descs);
 
-        unsafe { device.create_render_pass(&info, None).expect("Failed to create render procedure(renderpass), setup color attachments and sub procedure(subpass) dependencies") }
+        unsafe { 
+            device.create_render_pass(&info, None)
+                .expect("Failed to create render procedure(renderpass), setup color attachments and sub procedure(subpass) dependencies")
+        }
     }
 
     fn new_pipeline(
@@ -1005,7 +996,7 @@ impl VkApp {
         };
         let ubos = [ubo];
 
-        self.uniform_buffers[self.current_frame].copy_from_slice::<f32, _>(&ubos);
+        self.uniform_buffer.copy_from_slice::<f32>(&ubos, self.current_frame);
     }
 
     fn record_command_buffer(
@@ -1068,7 +1059,7 @@ impl VkApp {
                 command_buffer, 
                 vk::PipelineBindPoint::GRAPHICS, 
                 self.pipeline_layout, 
-                0, &self.descriptor_sets[self.current_frame..=self.current_frame], &[]);
+                0, &[self.descriptor_set], &[]);
 
             self.device.cmd_draw_indexed(command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
 
@@ -1161,7 +1152,7 @@ impl Drop for VkApp {
 
         self.vertex_buffer.destroy();
         self.index_buffer.destroy();
-        for ub in self.uniform_buffers.iter_mut() { ub.destroy(); }
+        self.uniform_buffer.destroy();
 
         unsafe {
             self.device.destroy_descriptor_pool(self.descriptor_pool, None);
@@ -1196,7 +1187,6 @@ impl Drop for VkApp {
 
 fn main() {
     env_logger::init();
-    
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
@@ -1248,7 +1238,7 @@ fn main() {
                         _ => {}
                     }
                 }
-                WindowEvent::MouseInput {state, .. } => {
+                WindowEvent::CursorMoved { position, .. } => {
 
                 }
                 WindowEvent::Resized(PhysicalSize {width, height}) => {
