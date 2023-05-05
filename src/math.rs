@@ -132,8 +132,8 @@ pub fn proj_mat(
     near_z: f32,
 ) -> Matrix4<f32> {
     Matrix4::new(
-        2.0 * aspect_ratio * near_z / scale_x, 0.0, 0.0, 0.0,
-        0.0, 2.0 * near_z / scale_y, 0.0, 0.0,
+        2.0 * near_z / scale_x, 0.0, 0.0, 0.0,
+        0.0, 2.0 * aspect_ratio * near_z / scale_y, 0.0, 0.0,
         0.0, 0.0, (near_z + scale_z) / scale_z, 1.0,
         0.0, 0.0, -(near_z + scale_z) * near_z / scale_z, 0.0,
     )

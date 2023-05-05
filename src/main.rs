@@ -3,27 +3,37 @@ pub mod vertex;
 pub mod buffer;
 pub mod texture;
 pub mod math;
+pub mod device;
+pub mod swapchain;
+pub mod pipeline;
+pub mod descriptor;
 
 use buffer::Buffer;
+use descriptor::UniformBufferObject;
 use vertex::Vertex;
 use texture::Texture;
-use cgmath::{Deg, Matrix4, Matrix3, Point3, Vector3, SquareMatrix};
+use cgmath::{Matrix4, Vector3};
 
 use raw_window_handle::{
     HasRawDisplayHandle, 
     HasRawWindowHandle,
 };
-use std::{ffi::{
-    CString, 
-    CStr,
-}, rc::Rc, time, f32::consts::{FRAC_PI_2, FRAC_PI_3}};
+use std::{
+    ffi::CString, 
+    rc::Rc, 
+    time, 
+    f32::consts::FRAC_PI_2
+};
 
 use winit::{
     self, 
     event_loop::EventLoop, 
     window::WindowBuilder, 
     dpi::PhysicalSize, 
-    event::{WindowEvent, VirtualKeyCode, ElementState}
+    event::{
+        WindowEvent,
+        VirtualKeyCode,
+    }
 };
 
 use ash::{
@@ -32,8 +42,7 @@ use ash::{
         SampleCountFlags, 
         AttachmentLoadOp, 
         AttachmentStoreOp, 
-        CommandPoolCreateFlags, 
-        CommandBufferUsageFlags, PhysicalDeviceMemoryProperties, BufferUsageFlags,
+        BufferUsageFlags,
     },
     extensions::{
         khr::{
@@ -137,7 +146,7 @@ impl VkApp {
         let debug_utils = DebugUtils::new(&entry, &instance);
         let debug_messenger = debug::new_messenger(&debug_utils);
 
-        let physical_device = Self::pick_physical_device(
+        let physical_device = device::pick_physical_device(
             &instance, 
             &surface, 
             surface_khr,
@@ -146,7 +155,7 @@ impl VkApp {
         let (device, 
             graphics_queue, 
             present_queue
-        ) = Self::new_logical_device_and_queues(
+        ) = device::new_logical_device_and_queues(
             &instance, 
             &surface, 
             surface_khr, 
@@ -158,7 +167,7 @@ impl VkApp {
             swapchain_images, 
             swapchain_image_format, 
             swapchain_extent
-        ) = Self::new_swapchain_and_images(
+        ) = swapchain::new_swapchain_and_images(
             &instance, 
             physical_device, 
             &device, 
@@ -167,7 +176,7 @@ impl VkApp {
             vk::Extent2D{width: WIDTH, height: HEIGHT}
         );
 
-        let swapchain_image_views = Self::new_swapchain_image_views(
+        let swapchain_image_views = swapchain::new_swapchain_image_views(
             &device, 
             &swapchain_images, 
             swapchain_image_format,
@@ -178,15 +187,15 @@ impl VkApp {
             swapchain_image_format,
         );
 
-        let descriptor_set_layout = Self::new_descriptor_set_layout(&device);
-        let (pipeline, pipeline_layout) = Self::new_pipeline(
+        let descriptor_set_layout = descriptor::new_descriptor_set_layout(&device);
+        let (pipeline, pipeline_layout) = pipeline::new_pipeline(
             &device, 
             swapchain_extent, 
             render_pass,
             descriptor_set_layout,
         );
 
-        let swapchain_framebuffers = Self::new_swapchain_framebuffers(
+        let swapchain_framebuffers = swapchain::new_swapchain_framebuffers(
             &device, 
             &swapchain_image_views, 
             render_pass, 
@@ -220,15 +229,15 @@ impl VkApp {
             device.clone(),
             &memory_props,
         );
-        let mut uniform_buffer = Buffer::new(
+        let uniform_buffer = Buffer::new(
             MAX_FRAMES_IN_FLIGHT,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             device.clone(),
             &memory_props,
         );
-        let descriptor_pool = Self::new_descriptor_pool(&device, MAX_FRAMES_IN_FLIGHT);
-        let descriptor_set = Self::new_descriptor_set(&device, descriptor_pool, descriptor_set_layout, &uniform_buffer);
+        let descriptor_pool = descriptor::new_descriptor_pool(&device, 1);
+        let descriptor_set = descriptor::new_descriptor_set(&device, descriptor_pool, descriptor_set_layout, &uniform_buffer);
 
         let command_pool = Self::new_command_pool(
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
@@ -243,7 +252,7 @@ impl VkApp {
             command_pool, 
         );
 
-        let (image_available_semaphores, render_finished_semaphores, in_flight_fences) = Self::new_sync_objetcs(&device);
+        let (image_available_semaphores, render_finished_semaphores, in_flight_fences) = Self::new_sync_objects(&device);
 
         let camera = Camera {
             x: 0.0, y: 0.0, z: 0.0,
@@ -305,83 +314,16 @@ impl VkApp {
         }
     }
 
-    fn new_descriptor_pool(device: &ash::Device, size: usize) -> vk::DescriptorPool {
-        let size = size as u32;
-
-        let pool_size = vk::DescriptorPoolSize::builder()
-            .ty(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(size)
-            .build();
-        let pool_sizes = [pool_size];
-
-        let info = vk::DescriptorPoolCreateInfo::builder()
-            .max_sets(size)
-            .pool_sizes(&pool_sizes);
-
-        unsafe { device.create_descriptor_pool(&info, None).expect("Failed to create descriptor pool") }
-    }
-
-    fn new_descriptor_set(
-        device: &ash::Device,
-        pool: vk::DescriptorPool,
-        layout: vk::DescriptorSetLayout,
-        uniform_buffer: &Buffer<UniformBufferObject>,
-    ) -> vk::DescriptorSet {
-        let layouts = [layout];
-        let alloc_info = vk::DescriptorSetAllocateInfo::builder()
-            .descriptor_pool(pool)
-            .set_layouts(&layouts);
-        let set = unsafe {
-            device.allocate_descriptor_sets(&alloc_info)
-                .expect("Failed to allocate descriptor sets")[0]
-        };
-
-        let buffer_info = vk::DescriptorBufferInfo::builder()
-                .buffer(uniform_buffer.handle)
-                .offset(0)
-                .range(std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize)
-                .build();
-        let buffer_infos = [buffer_info];
-
-        let write = vk::WriteDescriptorSet::builder()
-            .dst_set(set)
-            .dst_array_element(0)
-            .dst_binding(0)
-            .buffer_info(&buffer_infos)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .build();
-        let writes = [write];
-
-        unsafe { device.update_descriptor_sets(&writes, &[]) }
-        set
-    }
-
-    fn new_descriptor_set_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
-        let bindings = [
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(0)
-                .descriptor_count(1)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .stage_flags(vk::ShaderStageFlags::VERTEX)
-                .build(),
-        ];
-
-        let info = vk::DescriptorSetLayoutCreateInfo::builder()
-            .bindings(&bindings);
-
-        unsafe { device.create_descriptor_set_layout(&info, None).expect("Failed to create descriptor set layouts") }
-    }
-
     fn renew_swapchain(&mut self) {
         unsafe { self.device.device_wait_idle().unwrap(); }
 
         self.cleanup_swapchain();
 
-        (self.swapchain, self.swapchain_khr, self.swapchain_images, self.swapchain_image_format, self.swapchain_extent) = Self::new_swapchain_and_images(&self.instance, self.physical_device, &self.device, &self.surface, self.surface_khr, self.swapchain_extent);
+        (self.swapchain, self.swapchain_khr, self.swapchain_images, self.swapchain_image_format, self.swapchain_extent) = swapchain::new_swapchain_and_images(&self.instance, self.physical_device, &self.device, &self.surface, self.surface_khr, self.swapchain_extent);
 
-        self.swapchain_image_views = Self::new_swapchain_image_views(&self.device, &self.swapchain_images, self.swapchain_image_format);
+        self.swapchain_image_views = swapchain::new_swapchain_image_views(&self.device, &self.swapchain_images, self.swapchain_image_format);
 
-        self.swapchain_framebuffers = Self::new_swapchain_framebuffers(&self.device, &self.swapchain_image_views, self.render_pass, self.swapchain_extent);
+        self.swapchain_framebuffers = swapchain::new_swapchain_framebuffers(&self.device, &self.swapchain_image_views, self.render_pass, self.swapchain_extent);
     }
     
     fn cleanup_swapchain(&mut self) {
@@ -397,7 +339,7 @@ impl VkApp {
         }
     }
 
-    fn new_sync_objetcs(device: &ash::Device
+    fn new_sync_objects(device: &ash::Device
     ) -> (
         Vec<vk::Semaphore>, 
         Vec<vk::Semaphore>,
@@ -446,37 +388,13 @@ impl VkApp {
         surface_khr: vk::SurfaceKHR, 
         physical_device: vk::PhysicalDevice
     ) -> vk::CommandPool {
-        let (graphics, _) = Self::find_queue_families(physical_device, surface, surface_khr, instance);
+        let (graphics, _) = device::find_queue_families(physical_device, surface, surface_khr, instance);
 
         let info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(graphics.unwrap())
             .flags(create_flags);
 
         unsafe { device.create_command_pool(&info, None).expect("Failed to create command pool") }
-    }
-
-    fn new_swapchain_framebuffers(
-        device: &ash::Device, 
-        image_views: &[vk::ImageView], 
-        render_pass: vk::RenderPass, 
-        extent: vk::Extent2D,
-    ) -> Vec<vk::Framebuffer> {
-        image_views
-            .iter()
-            .map(|view|
-                {
-                    let attachments = [*view];
-                    let info = vk::FramebufferCreateInfo::builder()
-                        .attachments(&attachments)
-                        .render_pass(render_pass)
-                        .width(extent.width)
-                        .height(extent.height)
-                        .layers(1);
-
-                    unsafe { device.create_framebuffer(&info, None).unwrap() }
-                }
-            )
-            .collect()
     }
 
     fn new_render_pass(
@@ -526,290 +444,6 @@ impl VkApp {
         }
     }
 
-    fn new_pipeline(
-        device: &ash::Device,
-        swapchain_extent: vk::Extent2D,
-        render_pass: vk::RenderPass,
-        descriptor_set_layout: vk::DescriptorSetLayout,
-    ) -> (vk::Pipeline, vk::PipelineLayout) {
-        let dynamic_states = [
-            vk::DynamicState::VIEWPORT,
-            vk::DynamicState::SCISSOR,
-        ];
-
-        let dynamic_state_info = vk::PipelineDynamicStateCreateInfo::builder()
-            .dynamic_states(&dynamic_states)
-            .build();
-
-        let vert_code = vk_shader_macros::include_glsl!("shaders/foo.vert");
-        let frag_code = vk_shader_macros::include_glsl!("shaders/foo.frag");
-
-        let vert_module = Self::new_shader_module(device, vert_code);
-        let frag_module = Self::new_shader_module(device, frag_code);
-
-        let entry_name = CString::new("main").unwrap();
-        let vert_stage_info = vk::PipelineShaderStageCreateInfo::builder()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_module)
-            .name(&entry_name)
-            .build();
-        let frag_stage_info = vk::PipelineShaderStageCreateInfo::builder()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(frag_module)
-            .name(&entry_name)
-            .build();
-        let shader_stage_infos = [vert_stage_info, frag_stage_info];
-
-
-        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
-            .vertex_binding_descriptions(&Vertex::get_binding_descs())
-            .vertex_attribute_descriptions(&Vertex::get_attrib_descs())
-            .build();
-
-        let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false)
-            .build();
-
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: swapchain_extent.width as _,
-            height: swapchain_extent.height as _,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let viewports = [viewport];
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: swapchain_extent,
-        };
-        let scissors = [scissor];
-        let viewport_create_info = vk::PipelineViewportStateCreateInfo::builder()
-            .viewports(&viewports)
-            .scissors(&scissors)
-            .build();
-
-        let rasterizer_create_info = vk::PipelineRasterizationStateCreateInfo::builder()
-            .depth_clamp_enable(false)
-            .rasterizer_discard_enable(false)
-            .polygon_mode(vk::PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-            .depth_bias_enable(false)
-            .depth_bias_constant_factor(0.0)
-            .depth_bias_clamp(0.0)
-            .depth_bias_slope_factor(0.0)
-            .build();
-
-        let multisampling_create_info = vk::PipelineMultisampleStateCreateInfo::builder()
-            .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1)
-            .min_sample_shading(1.0)
-            // .sample_mask() // null
-            .alpha_to_coverage_enable(false)
-            .alpha_to_one_enable(false)
-            .build();
-
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::builder()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(false)
-            .src_color_blend_factor(vk::BlendFactor::ONE)
-            .dst_color_blend_factor(vk::BlendFactor::ZERO)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
-            .alpha_blend_op(vk::BlendOp::ADD)
-            .build();
-        let color_blend_attachments = [color_blend_attachment];
-
-        let color_blending_info = vk::PipelineColorBlendStateCreateInfo::builder()
-            .logic_op_enable(false)
-            .logic_op(vk::LogicOp::COPY)
-            .attachments(&color_blend_attachments)
-            .blend_constants([0.0, 0.0, 0.0, 0.0])
-            .build();
-
-        let descriptor_set_layouts = [descriptor_set_layout];
-        let layout = {
-            let layout_info = vk::PipelineLayoutCreateInfo::builder()
-                .set_layouts(&descriptor_set_layouts);
-                // .push_constant_ranges
-
-
-            unsafe {
-                device
-                    .create_pipeline_layout(&layout_info, None)
-                    .unwrap()
-            }
-        };
-
-        let info = vk::GraphicsPipelineCreateInfo::builder()
-            .dynamic_state(&dynamic_state_info)
-            .stages(&shader_stage_infos)
-            .vertex_input_state(&vertex_input_create_info)
-            .input_assembly_state(&input_assembly_create_info)
-            .viewport_state(&viewport_create_info)
-            .rasterization_state(&rasterizer_create_info)
-            .multisample_state(&multisampling_create_info)
-            .color_blend_state(&color_blending_info)
-            .layout(layout)
-            .render_pass(render_pass)
-            .subpass(0)
-            .build();
-        let pipeline = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None).unwrap()[0] };
-
-        unsafe {
-            device.destroy_shader_module(vert_module, None);
-            device.destroy_shader_module(frag_module, None);
-        };
-
-
-        (pipeline, layout)
-    }
-
-    fn new_shader_module(device: &ash::Device, src_code: &[u32]) -> vk::ShaderModule {
-        let info = vk::ShaderModuleCreateInfo::builder()
-            .code(src_code);
-
-        unsafe { device.create_shader_module(&info, None).unwrap() }
-    }
-
-    fn new_swapchain_image_views(
-        device: &ash::Device, 
-        images: &[vk::Image], 
-        format: vk::Format) -> Vec<vk::ImageView> {
-        images.iter()
-            .map(|image| {
-                let info = vk::ImageViewCreateInfo::builder()
-                    .image(*image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(format)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
-                    .build();
-                
-                unsafe { device.create_image_view(&info, None).unwrap() }
-            })
-            .collect()
-    }
-
-    fn new_swapchain_and_images(
-        instance: &ash::Instance,
-        physical_device: vk::PhysicalDevice,
-        device: &ash::Device,
-        surface: &Surface,
-        surface_khr: vk::SurfaceKHR,
-        preferred_swapchain_extent: vk::Extent2D,
-    ) -> (
-        Swapchain,
-        vk::SwapchainKHR,
-        Vec<vk::Image>,
-        vk::Format,
-        vk::Extent2D,
-        ) {
-        let (capabilities, formats, present_modes) = unsafe {
-            (
-                surface.get_physical_device_surface_capabilities(physical_device, surface_khr).unwrap(),
-                surface.get_physical_device_surface_formats(physical_device, surface_khr).unwrap(),
-                surface.get_physical_device_surface_present_modes(physical_device, surface_khr).unwrap(),
-            )
-        };
-
-        let format = Self::choose_swapchain_format(&formats);
-        let present_mode = Self::choose_swapchain_present_mode(&present_modes);
-        let extent = Self::choose_swapchain_extent(&capabilities, preferred_swapchain_extent);
-        let image_count = (capabilities.min_image_count + 1).min(capabilities.max_image_count);
-
-        log::debug!(
-            "Creating swapchain.\n\tFormat: {:?}\n\tColorSpace: {:?}\n\tPresentMode: {:?}\n\tExtent: {:?}\n\tImageCount: {:?}",
-            format.format,
-            format.color_space,
-            present_mode,
-            extent,
-            image_count,
-        );
-
-        let (graphics, present) = Self::find_queue_families(physical_device, surface, surface_khr, instance);
-        let family_indices = [graphics.unwrap(), present.unwrap()];
-
-        let info = {
-            let mut builder = vk::SwapchainCreateInfoKHR::builder()
-                .surface(surface_khr)
-                .min_image_count(image_count)
-                .image_format(format.format)
-                .image_color_space(format.color_space)
-                .image_extent(extent)
-                .image_array_layers(1)
-                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT);
-
-            builder = match (graphics, present) {
-                (Some(graphics), Some(present)) if graphics != present => builder
-                    .image_sharing_mode(vk::SharingMode::CONCURRENT)
-                    .queue_family_indices(&family_indices),
-                (Some(_), Some(_)) => builder.image_sharing_mode(vk::SharingMode::EXCLUSIVE),
-                _ => panic!(),
-            };
-
-            builder
-                .pre_transform(capabilities.current_transform)
-                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(present_mode)
-                .clipped(true)
-                .build()
-        };
-
-        let swapchain = Swapchain::new(instance, device);
-        let swapchain_khr = unsafe { swapchain.create_swapchain(&info, None).unwrap() };
-        let images = unsafe { swapchain.get_swapchain_images(swapchain_khr).unwrap() } ;
-
-        (swapchain, swapchain_khr, images, format.format, extent)
-    }
-
-    fn choose_swapchain_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
-        if formats.len() == 1 && formats[0].format == vk::Format::UNDEFINED {
-            return vk::SurfaceFormatKHR {
-                format: vk::Format::B8G8R8A8_UNORM,
-                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-            }
-        }
-
-        *formats
-            .iter()
-            .find(|f| 
-                f.format == vk::Format::B8G8R8A8_UNORM && f.color_space ==  vk::ColorSpaceKHR::SRGB_NONLINEAR)
-            .unwrap_or(&formats[0])
-    }
-
-    fn choose_swapchain_present_mode(present_modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
-        if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
-            vk::PresentModeKHR::MAILBOX
-        } else if present_modes.contains(&vk::PresentModeKHR::FIFO) {
-            vk::PresentModeKHR::FIFO
-        } else {
-            vk::PresentModeKHR::IMMEDIATE
-        }
-    }
-
-    fn choose_swapchain_extent(capabilities: &vk::SurfaceCapabilitiesKHR, preferred_swapchain_extent: vk::Extent2D) -> vk::Extent2D {
-        if capabilities.current_extent.width != u32::MAX {
-            return capabilities.current_extent;
-        }
-        
-        let min = capabilities.min_image_extent;
-        let max = capabilities.max_image_extent;
-        let width = preferred_swapchain_extent.width.min(max.width).max(min.width);
-        let height = preferred_swapchain_extent.height.min(max.height).max(min.height);
-        vk::Extent2D { width, height }
-    }
-
-
     fn new_instance(entry: &ash::Entry) -> ash::Instance {
         let app_name = CString::new("Vulkan Application").unwrap();
         let engine_name = CString::new("No Engine").unwrap();
@@ -840,143 +474,12 @@ impl VkApp {
 
         unsafe { entry.create_instance(&info, None).unwrap() }
     }
-
-    fn pick_physical_device(
-        instance: &ash::Instance, 
-        surface: &Surface, 
-        surface_khr: vk::SurfaceKHR) -> vk::PhysicalDevice {
-        let physical_device = unsafe{instance.enumerate_physical_devices()}
-            .unwrap()
-            .into_iter()
-            .find(|device| Self::is_physical_device_suitable(*device, surface, surface_khr, &instance))
-            .unwrap();
-
-        let props = unsafe {instance.get_physical_device_properties(physical_device)};
-        log::debug!("Selected physical device: {:?}", unsafe{CStr::from_ptr(props.device_name.as_ptr())});
-        physical_device
-    }
-
-    fn is_physical_device_suitable(
-        physical_device: vk::PhysicalDevice, 
-        surface: &Surface, 
-        surface_khr: vk::SurfaceKHR, 
-        instance: &ash::Instance) -> bool {
-        let (graphics, present) = Self::find_queue_families(physical_device, surface, surface_khr, &instance);
-        graphics.is_some() && present.is_some()
-    }
-
-    fn find_queue_families(
-        physical_device: vk::PhysicalDevice,
-        surface: &Surface,
-        surface_khr: vk::SurfaceKHR,
-        instance: &ash::Instance) -> (Option<u32>, Option<u32>) {
-        let props = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-
-        let mut graphics_index = None;
-        let mut present_index = None;
-
-        for (index, family) in props.iter().filter(|p| p.queue_count > 0).enumerate() {
-            let index = index as u32;
-
-            if graphics_index.is_none() && family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-                graphics_index = Some(index);
-            }
-
-            let present_support = unsafe { surface.get_physical_device_surface_support(physical_device, index, surface_khr) }.unwrap();
-            if present_index.is_none() && present_support {
-                present_index = Some(index);
-            }
-
-            if graphics_index.is_some() && present_index.is_some() {
-                break;
-            }
-        }
-        (graphics_index, present_index)
-    }
     
-    fn new_logical_device_and_queues(
-        instance: &ash::Instance, 
-        surface: &Surface,
-        surface_khr: vk::SurfaceKHR,
-        physical_device: vk::PhysicalDevice
-    ) -> (Rc<ash::Device>, vk::Queue, vk::Queue) {
-
-        let (graphics_family_index, present_family_index) = Self::find_queue_families(physical_device, surface, surface_khr, instance);
-        let graphics_family_index = graphics_family_index.unwrap();
-        let present_family_index = present_family_index.unwrap();
-        
-        let queue_priorities = [1.0];
-
-        let queue_infos = {
-            let mut indices = vec![graphics_family_index, present_family_index];
-            indices.dedup();
-
-            indices.iter().map(|&index| vk::DeviceQueueCreateInfo::builder()
-                .queue_family_index(index)
-                .queue_priorities(&queue_priorities)
-                .build())
-            .collect::<Vec<_>>()
-        };
-
-        let (_, layer_name_ptrs) = &debug::get_layer_names_and_ptrs();
-
-        let physical_device_features = vk::PhysicalDeviceFeatures::builder();
-        let (_, device_extension_name_ptrs) = &Self::get_device_extension_names_and_ptrs();
-
-        Self::check_device_extension_support(&instance, physical_device);
-
-        let mut info = vk::DeviceCreateInfo::builder()
-            .queue_create_infos(&queue_infos)
-            .enabled_features(&physical_device_features)
-            .enabled_extension_names(&device_extension_name_ptrs);
-
-        #[cfg(debug_assertions)] {
-            info = info.enabled_layer_names(&layer_name_ptrs);
-        }
-
-        unsafe {
-            let device = instance.create_device(physical_device, &info, None).unwrap();
-            let graphics_queue = device.get_device_queue(graphics_family_index, 0);
-            let present_queue = device.get_device_queue(present_family_index, 0);
-
-            (Rc::from(device), graphics_queue, present_queue)
-        }
-    }
-
-    fn check_device_extension_support(instance: &ash::Instance, physical_device: vk::PhysicalDevice) {
-        let (required_extensions, _) = &Self::get_device_extension_names_and_ptrs();
-
-        let extension_props = unsafe {
-            instance
-                .enumerate_device_extension_properties(physical_device)
-                .unwrap()
-        };
-
-        for required in required_extensions.iter() {
-            let found = extension_props.iter().any(|ext| {
-                let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
-                required == &name
-            });
-
-            if !found {
-                panic!("Could not find required device extension {:?}", required)
-            }
-        }
-    }
-
-    fn get_device_extension_names_and_ptrs() -> (Vec<&'static CStr>, Vec<*const i8>) {
-        let c_device_extension_names = vec![Swapchain::name()];
-        let device_extension_name_ptrs = c_device_extension_names.iter()
-            .map(|name| name.as_ptr())
-            .collect::<Vec<_>>();
-
-        (c_device_extension_names, device_extension_name_ptrs)
-    }
 
     fn update_uniform_buffer(&mut self) {
         let elapsed = self.start_instant.elapsed().as_secs_f32();
 
-        let aspect_ratio = self.swapchain_extent.height as f32 / self.swapchain_extent.width as f32;
+        let aspect_ratio = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
 
         let mut view = math::inverse_rigid_mat(self.camera.x_z_angle, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0);
         let angle = self.camera.x_z_angle + FRAC_PI_2;
@@ -1044,7 +547,7 @@ impl VkApp {
         };
 
         unsafe { 
-            self.device.begin_command_buffer(command_buffer, &begin_info).unwrap();
+            self.device.begin_command_buffer(command_buffer, &begin_info).expect("Failed to begin recording command buffer");
 
             self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
 
@@ -1065,7 +568,7 @@ impl VkApp {
 
             self.device.cmd_end_render_pass(command_buffer);
 
-            self.device.end_command_buffer(command_buffer).unwrap();
+            self.device.end_command_buffer(command_buffer).expect("Could not end recording command buffer");
         }
         
     }
@@ -1097,7 +600,12 @@ impl VkApp {
             }
         };
 
-        unsafe { self.device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty()).unwrap(); }
+        unsafe { 
+            self.device.reset_command_buffer(
+                command_buffer, 
+                vk::CommandBufferResetFlags::empty()
+            ).expect("Failed to reset command buffer contents"); 
+        }
         self.record_command_buffer(command_buffer, image_index as usize);
 
         self.update_uniform_buffer();
@@ -1252,15 +760,6 @@ fn main() {
         }
     })
 }
-
-//TODO: update to projective geometric algebra
-#[derive(Clone, Copy)]
-struct UniformBufferObject {
-    model: Matrix4<f32>,
-    view: Matrix4<f32>,
-    proj: Matrix4<f32>
-}
-
 struct Camera {
     x: f32,
     y: f32,
@@ -1273,7 +772,3 @@ struct Camera {
     scale_z: f32,
     near_z: f32,
 }
-
-
-
-
