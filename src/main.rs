@@ -7,12 +7,13 @@ pub mod device;
 pub mod swapchain;
 pub mod pipeline;
 pub mod descriptor;
+pub mod game_object;
 
 use buffer::Buffer;
 use descriptor::UniformBufferObject;
+use pipeline::PushConstantData;
 use vertex::Vertex;
 use texture::Texture;
-use cgmath::{Matrix4, Vector3};
 
 use raw_window_handle::{
     HasRawDisplayHandle, 
@@ -59,24 +60,27 @@ const HEIGHT: u32 = 600;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 const VERTICES: [Vertex; 4] = [
     Vertex {
-        pos: [-0.5, 0.0, -0.5],
+        pos: [-0.5, -0.5, 0.0],
         color: [1.0, 0.0, 0.0],
     },
     Vertex {
-        pos: [0.5, 0.0, -0.5],
+        pos: [0.5, -0.5, 0.0],
         color: [0.0, 1.0, 1.0],
     },
     Vertex {
-        pos: [0.5, 0.0, 0.5],
+        pos: [0.5, 0.5, 0.0],
         color: [0.0, 0.0, 1.0],
     },
     Vertex {
-        pos: [-0.5, 0.0, 0.5],
+        pos: [-0.5, 0.5, 0.0],
         color: [0.0, 1.0, 0.0],
     },
 ];
-const INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
+const INDICES: [u16; 6] = [0, 2, 1, 0, 3, 2];
 
+struct App {
+
+}
 
 struct VkApp {
     camera: Camera,
@@ -258,10 +262,8 @@ impl VkApp {
             x: 0.0, y: 0.0, z: 0.0,
             x_z_angle: 0.0,
             xz_y_angle: 0.0,
-            scale_x: 1.0,
-            scale_y: 1.0,
-            scale_z: 10.0,
             near_z: 1.0,
+            far_z: 10.0,
         };
 
         Self {
@@ -479,22 +481,26 @@ impl VkApp {
     fn update_uniform_buffer(&mut self) {
         let elapsed = self.start_instant.elapsed().as_secs_f32();
 
-        let aspect_ratio = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
+        let mut view = math::TransformMat::identity();
 
-        let mut view = math::inverse_rigid_mat(self.camera.x_z_angle, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0);
-        let angle = self.camera.x_z_angle + FRAC_PI_2;
-        let axis: Vector3<f32> = Vector3::new(angle.cos(), 0.0, angle.sin()).cross(Vector3::new(0.0, 1.0, 0.0));
-        view = view * math::inverse_rigid_mat(self.camera.xz_y_angle, axis.x, axis.y, axis.z, self.camera.x, self.camera.y, self.camera.z);
+        let plane = math::Vector::new(0.0, -1.0, 0.0)
+            .wedge(
+                &math::Vector::new(self.camera.x_z_angle.sin(), 0.0, self.camera.x_z_angle.cos())
+            );
+
+        view
+            .translate(-self.camera.x, -self.camera.y, -self.camera.z)
+            .rotate(-self.camera.xz_y_angle, plane.yx, plane.zy, plane.xz)
+            .rotate(-self.camera.x_z_angle, 0.0, 0.0, 1.0);
+
+        let aspect_ratio = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
         
         let ubo = UniformBufferObject {
-            model: math::rigid_mat(1.04, 1.0, 0.0, 0.0, 0.0, 0.0, 6.0),
-            view,
-            proj: math::proj_mat(
+            view_proj: math::project(
+                view,
                 aspect_ratio,
-                self.camera.scale_x,
-                self.camera.scale_y,
-                self.camera.scale_z,
                 self.camera.near_z,
+                self.camera.far_z,
             ),
         };
         let ubos = [ubo];
@@ -563,6 +569,19 @@ impl VkApp {
                 vk::PipelineBindPoint::GRAPHICS, 
                 self.pipeline_layout, 
                 0, &[self.descriptor_set], &[]);
+            
+            
+            let push_data = pipeline::PushConstantData {
+                model: *math::TransformMat::identity().translate(0.0, 0.0, 4.0),
+            };
+
+            self.device.cmd_push_constants(
+                command_buffer, 
+                self.pipeline_layout, 
+                vk::ShaderStageFlags::VERTEX, 
+                0, 
+                push_data.as_bytes(),
+            );
 
             self.device.cmd_draw_indexed(command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
 
@@ -581,10 +600,9 @@ impl VkApp {
         let in_flight_fence = self.in_flight_fences[self.current_frame];
         let command_buffer = self.command_buffers[self.current_frame];
 
-        let wait_fences = [in_flight_fence];
         unsafe { 
-            self.device.wait_for_fences(&wait_fences, true, u64::MAX).unwrap();
-            self.device.reset_fences(&wait_fences).unwrap();
+            self.device.wait_for_fences(&[in_flight_fence], true, u64::MAX).unwrap();
+            self.device.reset_fences(&[in_flight_fence]).unwrap();
         }
 
         let image_index = unsafe {
@@ -610,33 +628,25 @@ impl VkApp {
 
         self.update_uniform_buffer();
 
-        let wait_semaphores = [image_available_semaphore];
-        let signal_semaphores = [render_finished_semaphore];
-
         //render
         {
-            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let command_buffers = [command_buffer];
             let render_info = vk::SubmitInfo::builder()
-                .command_buffers(&command_buffers)
-                .wait_dst_stage_mask(&wait_stages)
-                .wait_semaphores(&wait_semaphores)
-                .signal_semaphores(&signal_semaphores)
+                .command_buffers(&[command_buffer])
+                .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
+                .wait_semaphores(&[image_available_semaphore])
+                .signal_semaphores(&[render_finished_semaphore])
                 .build();
             let render_infos = [render_info];
 
             unsafe { self.device.queue_submit(self.graphics_queue, &render_infos, in_flight_fence).unwrap(); }
         }
 
-        let swapchain_khrs = [self.swapchain_khr];
-        let image_indices = [image_index];
-
         //present
         {
             let present_info = vk::PresentInfoKHR::builder()
-                .wait_semaphores(&signal_semaphores)
-                .swapchains(&swapchain_khrs)
-                .image_indices(&image_indices)
+                .wait_semaphores(&[render_finished_semaphore])
+                .swapchains(&[self.swapchain_khr])
+                .image_indices(&[image_index])
                 .build();
             unsafe {
                 match self.swapchain.queue_present(self.present_queue, &present_info) {
@@ -728,20 +738,32 @@ fn main() {
                     }
                     match input.virtual_keycode.unwrap() {
                         VirtualKeyCode::W => {
-                            app.camera.x += 0.1 * app.camera.x_z_angle.sin();
                             app.camera.z += 0.1 * app.camera.x_z_angle.cos();
+                            app.camera.x += 0.1 * app.camera.x_z_angle.sin();
                         } 
                         VirtualKeyCode::S => {
-                            app.camera.x -= 0.1 * app.camera.x_z_angle.sin();
                             app.camera.z -= 0.1 * app.camera.x_z_angle.cos();
+                            app.camera.x -= 0.1 * app.camera.x_z_angle.sin();
                         }
                         VirtualKeyCode::D => {
+                            app.camera.z -= 0.1 * app.camera.x_z_angle.sin();
                             app.camera.x += 0.1 * app.camera.x_z_angle.cos();
-                            app.camera.z += 0.1 * app.camera.x_z_angle.sin();
                         } 
                         VirtualKeyCode::A => {
+                            app.camera.z += 0.1 * app.camera.x_z_angle.sin();
                             app.camera.x -= 0.1 * app.camera.x_z_angle.cos();
-                            app.camera.z -= 0.1 * app.camera.x_z_angle.sin();
+                        }
+                        VirtualKeyCode::Up => {
+                            app.camera.xz_y_angle -= 0.01;
+                        } 
+                        VirtualKeyCode::Down => {
+                            app.camera.xz_y_angle += 0.01;
+                        }
+                        VirtualKeyCode::Right => {
+                            app.camera.x_z_angle += 0.01;
+                        } 
+                        VirtualKeyCode::Left => {
+                            app.camera.x_z_angle -= 0.01;
                         }
                         _ => {}
                     }
@@ -767,8 +789,6 @@ struct Camera {
     x_z_angle: f32,
     xz_y_angle: f32,
 
-    scale_x: f32,
-    scale_y: f32,
-    scale_z: f32,
     near_z: f32,
+    far_z: f32,
 }

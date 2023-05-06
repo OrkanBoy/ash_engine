@@ -1,6 +1,6 @@
 use std::ffi::CString;
 
-use ash::vk;
+use ash::vk::{self, ShaderStageFlags};
 
 use crate::vertex;
 
@@ -119,11 +119,17 @@ pub fn new_pipeline(
         .blend_constants([0.0, 0.0, 0.0, 0.0])
         .build();
 
+    let push_constant_range = vk::PushConstantRange::builder()
+        .stage_flags(ShaderStageFlags::VERTEX)
+        .size(std::mem::size_of::<PushConstantData>() as u32)
+        .build();
+    let push_constant_ranges = [push_constant_range];
+
     let descriptor_set_layouts = [descriptor_set_layout];
     let layout = {
         let layout_info = vk::PipelineLayoutCreateInfo::builder()
-            .set_layouts(&descriptor_set_layouts);
-            // .push_constant_ranges
+            .set_layouts(&descriptor_set_layouts)
+            .push_constant_ranges(&push_constant_ranges);
 
 
         unsafe {
@@ -155,4 +161,20 @@ pub fn new_pipeline(
 
 
     (pipeline, layout)
+}
+
+//maybe use 4 x 3 matrices
+pub struct PushConstantData {
+    pub model: crate::math::TransformMat,
+}
+
+impl PushConstantData {
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self as *const PushConstantData as *const u8, 
+                std::mem::size_of::<PushConstantData>()
+            )
+        }
+    }
 }

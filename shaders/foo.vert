@@ -5,15 +5,17 @@
 layout(location = 0) in vec3 vPos;
 layout(location = 1) in vec3 vColor;
 
-layout(binding = 0) uniform UniformBufferObject {
-    mat4 model;
-    mat4 view;
-    mat4 proj;
+layout(binding = 0, row_major) uniform UniformBufferObject {
+    mat4 viewProj;
+};
+
+layout(push_constant, row_major) uniform Push {
+    mat4x3 model;
 };
 
 layout(location = 0) out vec3 fragColor;
 
 void main() {
-    gl_Position = proj * view * model * vec4(vPos, 1.0);
+    gl_Position = viewProj * vec4(model * vec4(vPos, 1.0), 1.0);
     fragColor = vColor;
 }

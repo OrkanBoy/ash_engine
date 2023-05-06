@@ -1,14 +1,11 @@
 use ash::vk;
-use cgmath::Matrix4;
 
 use crate::buffer;
 
 //TODO: update descriptor set managing system
 #[derive(Clone, Copy)]
 pub struct UniformBufferObject {
-    pub model: Matrix4<f32>,
-    pub view: Matrix4<f32>,
-    pub proj: Matrix4<f32>
+    pub view_proj: crate::math::Mat,
 }
 
 
