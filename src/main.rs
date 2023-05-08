@@ -9,7 +9,6 @@ pub mod descriptor;
 pub mod instance;
 
 use buffer::Buffer;
-use cgmath::Vector3;
 use data::VertexData;
 use descriptor::UniformBufferObject;
 use instance::Particle;
@@ -19,6 +18,7 @@ use raw_window_handle::{
     HasRawDisplayHandle, 
     HasRawWindowHandle,
 };
+use winapi::um::wingdi::GetRandomRgn;
 use std::{
     ffi::CString, 
     rc::Rc, 
@@ -52,8 +52,6 @@ use ash::{
         ext::DebugUtils
     },
 };
-
-use crate::math::Vector;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -208,7 +206,7 @@ impl VkApp {
         
         const MAX_VERTICES_COUNT: usize = 100;
         const MAX_INDICES_COUNT: usize = 100;
-        const MAX_PARTICLES_INSTANCE_COUNT: usize = 40 * 40 * 40;
+        const MAX_PARTICLES_INSTANCE_COUNT: usize = 40;
         let vertex_buffer = Buffer::new(
             MAX_VERTICES_COUNT,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
@@ -262,6 +260,8 @@ impl VkApp {
             xz_y_angle: 0.0,
             near_z: 1.0,
             far_z: 100.0,
+            translation_speed: 10.0,
+            rotation_speed: 3.0,
         };
         
         Self {
@@ -325,6 +325,8 @@ impl VkApp {
                     scale: math::Vector::new(1.0, 1.0, 1.0),
                     rotation: math::Bivector::new(0.0, 0.0, 0.0).exp(), 
                     translation: math::Vector::new(0.0, 0.0, 0.0),
+                    translation_velocity: math::Vector::new(0.0, 0.0, 0.0),
+                    rotation_velocity: math::Bivector::new(0.0, 0.0, 0.0),
                 };
                 MAX_PARTICLES_INSTANCE_COUNT
             ],
@@ -496,8 +498,6 @@ impl VkApp {
     
 
     fn update_uniform_buffer(&mut self) {
-        let elapsed = self.start_instant.elapsed().as_secs_f32();
-
         let mut view = math::ModelMat::identity();
 
         let plane = math::Vector::new(0.0, -1.0, 0.0)
@@ -575,29 +575,34 @@ impl VkApp {
         id
     }
 
+    fn unload_particle(&mut self, particle_id: usize) {
+        todo!()
+    }
+
     fn load_particle_instances(
         &mut self,
         particle_id: usize,
         particle_instances_count: usize,
-    ) -> Vec<usize> {
+    ) {
         let particle = &mut self.particles[particle_id];
-
-        let old_particle_instance_count = particle.instance_slice.count;
 
         particle.instance_slice.count += particle_instances_count;  
         if particle.instance_slice.count > particle.instance_slice_max_count {
             panic!(
-                "Particle instances count {} exceeded {} allowed for particle {}", 
+                "Particle instances count {} more than {} allowed for particle {}", 
                 particle.instance_slice.count,
                 particle.instance_slice_max_count,
                 particle_id
             );
         }
+    }
 
-        let particle_instance_ids = 
-            particle.instance_slice.index + old_particle_instance_count.. 
-            particle.instance_slice.index + particle.instance_slice.count;
-        particle_instance_ids.collect()
+    fn unload_particle_instances(
+        &mut self,
+        particle_id: usize,
+        particle_instances_count: usize,
+    ) {
+        self.particles[particle_id].instance_slice.count -= particle_instances_count;
     }
 
     fn update_particle_instance_buffer(&mut self) {
@@ -786,6 +791,50 @@ impl VkApp {
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
         false
     }
+
+    pub fn init_game(&mut self) {
+        let triangle_vertices = [
+            VertexData {
+                pos: [-0.5, -0.5, 0.0],
+                color: [0.5, 1.0, 0.0],
+            },
+            VertexData {
+                pos: [0.5, -0.5, 0.0],
+                color: [0.0, 0.5, 1.0],
+            },
+            VertexData {
+                pos: [0.5, 0.5, 0.0],
+                color: [1.0, 0.0, 1.0],
+            },
+        ];
+        let triangle_indices1 = [
+            0, 2, 1,
+        ];
+    
+        let id = self.load_particle(&triangle_vertices, &triangle_indices1, 2);
+        self.load_particle_instances(id, 2);
+
+        self.particle_instances[0].translation = math::Vector::new(-1.0, 0.0, 0.0);
+        self.particle_instances[1].translation = math::Vector::new(1.0, 0.0, 0.0);
+    }
+
+    pub fn update_game(&mut self, dt: f32) {
+        let coupling = 10.0;
+
+        let d = 
+            self.particle_instances[0].translation - 
+            self.particle_instances[1].translation;
+
+        let norm_sqr = d.norm_sqr();
+        let force = if norm_sqr < 0.2 {
+            math::Vector::new(0.0, 0.0, 0.0)
+        } else {
+            d / norm_sqr / norm_sqr.sqrt() * coupling
+        };
+
+        self.particle_instances[0].update_translation_kinematics(-force, dt);
+        self.particle_instances[1].update_translation_kinematics(force, dt);
+    }
 }
 
 impl Drop for VkApp {
@@ -843,74 +892,24 @@ fn main() {
         .unwrap();
     let mut app = VkApp::new(&window);
 
-
-    let triangle_vertices1 = [
-        VertexData {
-            pos: [-0.5, -0.5, 0.0],
-            color: [0.5, 1.0, 0.0],
-        },
-        VertexData {
-            pos: [0.5, -0.5, 0.0],
-            color: [0.0, 0.5, 1.0],
-        },
-        VertexData {
-            pos: [0.5, 0.5, 0.0],
-            color: [1.0, 0.0, 1.0],
-        },
-    ];
-    let triangle_indices1 = [
-        0, 2, 1,
-    ];
-
-    let triangle_vertices2 = [
-        VertexData {
-            pos: [-0.2, -0.5, 1.0],
-            color: [0.3, 1.0, 0.0],
-        },
-        VertexData {
-            pos: [0.5, -0.5, 0.3],
-            color: [0.0, 0.3, 1.0],
-        },
-        VertexData {
-            pos: [0.5, 0.5, 0.0],
-            color: [0.7, 0.0, 0.2],
-        },
-    ];
-    let triangle_indices2 = [
-        0, 2, 1,
-    ];
-
-    let particle_cube_size = 15;
-    let particle_count = particle_cube_size * particle_cube_size * particle_cube_size;
-
-    let id1 = app.load_particle(&triangle_vertices1, &triangle_indices1, particle_count / 2);
-    app.load_particle_instances(id1, particle_count / 2);
-
-    let id2 = app.load_particle(&triangle_vertices2, &triangle_indices2, particle_count / 2);
-    app.load_particle_instances(id2, particle_count / 2);
-
-    for x in 0..particle_cube_size {
-        let fx = x as f32;
-        for y in 0..particle_cube_size {
-            let fy = y as f32;
-            for z in 0..particle_cube_size {
-                let fz = z as f32;
-
-                let p = &mut app.particle_instances[x + particle_cube_size * y + particle_cube_size * particle_cube_size * z];
-                p.translation = math::Vector::new(fx, fy, fz);
-                p.rotation = math::Bivector::new(fx * 0.1, fy * 0.1, fz * 0.1).exp();
-            }
-        }
-    }
-
+    app.init_game();
 
     //running app
     let mut dirty_swapchain = false;
-    use winit::{event_loop::ControlFlow, event::Event};
+    let mut start_frame_time = 0.0;
+    let mut end_frame_time = app.start_instant.elapsed().as_secs_f32();
+    let mut dt = end_frame_time;
 
+    use winit::{event_loop::ControlFlow, event::Event};
     event_loop.run(move |system_event, _, control_flow| {
         match system_event {
             Event::MainEventsCleared => {
+                start_frame_time = end_frame_time;
+                end_frame_time = app.start_instant.elapsed().as_secs_f32();
+                dt = end_frame_time - start_frame_time;
+
+                app.update_game(dt);
+
                 if dirty_swapchain {
                     if app.swapchain_extent.width > 0 && app.swapchain_extent.height > 0 {
                         app.renew_swapchain();
@@ -925,40 +924,39 @@ fn main() {
                     if input.virtual_keycode.is_none() {
                         return;
                     }
+                    let dtranslation = app.camera.translation_speed * dt;
+                    let drotation = app.camera.rotation_speed * dt;
                     match input.virtual_keycode.unwrap() {
                         VirtualKeyCode::W => {
-                            app.camera.z += 0.1 * app.camera.x_z_angle.cos();
-                            app.camera.x += 0.1 * app.camera.x_z_angle.sin();
+                            app.camera.z += dtranslation * app.camera.x_z_angle.cos();
+                            app.camera.x += dtranslation * app.camera.x_z_angle.sin();
                         } 
                         VirtualKeyCode::S => {
-                            app.camera.z -= 0.1 * app.camera.x_z_angle.cos();
-                            app.camera.x -= 0.1 * app.camera.x_z_angle.sin();
+                            app.camera.z -= dtranslation * app.camera.x_z_angle.cos();
+                            app.camera.x -= dtranslation * app.camera.x_z_angle.sin();
                         }
                         VirtualKeyCode::D => {
-                            app.camera.z -= 0.1 * app.camera.x_z_angle.sin();
-                            app.camera.x += 0.1 * app.camera.x_z_angle.cos();
+                            app.camera.z -= dtranslation * app.camera.x_z_angle.sin();
+                            app.camera.x += dtranslation * app.camera.x_z_angle.cos();
                         } 
                         VirtualKeyCode::A => {
-                            app.camera.z += 0.1 * app.camera.x_z_angle.sin();
-                            app.camera.x -= 0.1 * app.camera.x_z_angle.cos();
+                            app.camera.z += dtranslation * app.camera.x_z_angle.sin();
+                            app.camera.x -= dtranslation * app.camera.x_z_angle.cos();
                         }
                         VirtualKeyCode::Up => {
-                            app.camera.xz_y_angle -= 0.01;
+                            app.camera.xz_y_angle -= drotation;
                         } 
                         VirtualKeyCode::Down => {
-                            app.camera.xz_y_angle += 0.01;
+                            app.camera.xz_y_angle += drotation;
                         }
                         VirtualKeyCode::Right => {
-                            app.camera.x_z_angle += 0.01;
+                            app.camera.x_z_angle += drotation;
                         } 
                         VirtualKeyCode::Left => {
-                            app.camera.x_z_angle -= 0.01;
+                            app.camera.x_z_angle -= drotation;
                         }
                         _ => {}
                     }
-                }
-                WindowEvent::CursorMoved { position, .. } => {
-
                 }
                 WindowEvent::Resized(PhysicalSize {width, height}) => {
                     dirty_swapchain = true;
@@ -980,4 +978,7 @@ struct Camera {
 
     near_z: f32,
     far_z: f32,
+
+    translation_speed: f32,
+    rotation_speed: f32,
 }

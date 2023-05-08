@@ -1,11 +1,35 @@
 use ash::vk;
-use crate::math;
+use crate::math::{self, Rotor};
 
 #[derive(Clone, Copy)]
 pub struct Instance {
     pub scale: math::Vector,
     pub rotation: math::Rotor,
     pub translation: math::Vector,
+
+    pub translation_velocity: math::Vector,
+    pub rotation_velocity: math::Bivector,
+}
+
+impl Instance {
+    pub fn update_translation_kinematics(
+        &mut self,
+        translation_acceleration: math::Vector,
+        dt: f32,
+    ) {
+        self.translation_velocity += translation_acceleration * dt;
+        self.translation += self.translation_velocity * dt;
+    }
+
+    pub fn update_rotation_kinematics(
+        &mut self,
+        rotation_acceleration: math::Bivector,
+        dt: f32,
+    ) {
+        self.rotation_velocity += rotation_acceleration * dt;
+        self.rotation += self.rotation_velocity * dt * self.rotation;
+        self.rotation /= self.rotation.norm_sqr().sqrt(); //Find better way, sqrt is expensive
+    }
 }
 
 pub struct  UniformData {
@@ -16,15 +40,6 @@ pub struct  UniformData {
 pub struct BufferSlice {
     pub index: usize,
     pub count: usize,
-}
-
-pub struct GameObject {
-    pub vertex_slice: BufferSlice,
-    pub index_slice: BufferSlice,
-
-    pub uniform_buffer: vk::Buffer,
-    pub uniform_memory: vk::DeviceMemory,
-    pub uniform_instances_size: usize,
 }
 
 #[derive(Debug)]

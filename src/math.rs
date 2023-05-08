@@ -1,5 +1,5 @@
 //implement own sin cos
-use cgmath::*;
+use std::ops::*;
 
 //Plan: Explore R3,3 bivector generator basis
 //generates 6 shears, 3 pseudo-projections, 3 scales, 3 translation, 3 rotations
@@ -82,7 +82,7 @@ pub struct ModelMat {
     r2c3: f32,
 }
 
-impl std::ops::Mul for ModelMat {
+impl Mul for ModelMat {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self::Output {
@@ -260,11 +260,71 @@ impl Vector {
         Self { x, y, z }
     }
 
+    pub fn norm_sqr(&self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
     pub fn wedge(&self, rhs: &Vector) -> Bivector {
         Bivector { 
             yx: self.x * rhs.y - self.y * rhs.x, 
             zy: self.y * rhs.z - self.z * rhs.y, 
             xz: self.z * rhs.x - self.x * rhs.z,
+        }
+    }
+}
+
+impl Sub for Vector {
+    type Output = Vector;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+            z: self.z - rhs.z,
+        }
+    }
+}
+
+impl Div<f32> for Vector {
+    type Output = Vector;
+
+    fn div(self, rhs: f32) -> Self::Output {
+        Self {
+            x: self.x / rhs,
+            y: self.y / rhs,
+            z: self.z / rhs,
+        }
+    }
+}
+
+impl Mul<f32> for Vector {
+    type Output = Vector;
+
+    fn mul(self, rhs: f32) -> Self::Output {
+        Self {
+            x: self.x * rhs,
+            y: self.y * rhs,
+            z: self.z * rhs,
+        }
+    }
+}
+
+impl AddAssign for Vector {
+    fn add_assign(&mut self, rhs: Self) {
+        self.x += rhs.x;
+        self.y += rhs.y;
+        self.z += rhs.z;
+    }
+}
+
+impl Neg for Vector {
+    type Output = Vector;
+
+    fn neg(self) -> Self::Output {
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
         }
     }
 }
@@ -305,6 +365,39 @@ impl Bivector {
     }
 }
 
+impl AddAssign for Bivector {
+    fn add_assign(&mut self, rhs: Self) {
+        self.yx += rhs.yx;
+        self.zy += rhs.zy;
+        self.xz += rhs.xz;
+    }
+}
+
+impl Mul<f32> for Bivector {
+    type Output = Bivector;
+
+    fn mul(self, rhs: f32) -> Self::Output {
+        Self {
+            yx: self.yx * rhs,
+            zy: self.zy * rhs,
+            xz: self.xz * rhs,
+        }
+    }
+}
+
+impl Mul<Rotor> for Bivector {
+    type Output = Rotor;
+
+    fn mul(self, rhs: Rotor) -> Self::Output {
+        Rotor {
+            _1:-self.yx * rhs.yx - self.zy * rhs.zy - self.xz * rhs.xz,
+            yx: self.yx * rhs._1 + self.zy * rhs.xz - self.xz * rhs.zy,
+            zy: self.zy * rhs._1 - self.yx * rhs.xz + self.xz * rhs.yx,
+            xz: self.zy * rhs.yx - self.yx * rhs.zy + self.xz * rhs._1,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Rotor {
     _1: f32,
@@ -313,7 +406,24 @@ pub struct Rotor {
     xz: f32,
 }
 
-impl std::ops::Mul for Rotor {
+impl Rotor {
+    pub fn new(
+        _1: f32,
+        yx: f32,
+        zy: f32,
+        xz: f32,
+    ) -> Self {
+        Self {
+            _1, yx, zy, xz
+        }
+    }
+
+    pub fn norm_sqr(&self) -> f32 {
+        self._1 * self._1 + self.yx * self.yx + self.zy * self.zy + self.xz * self.xz
+    }
+}
+
+impl Mul for Rotor {
     type Output = Rotor;
 
     fn mul(self, rhs: Self) -> Self::Output {
@@ -326,8 +436,21 @@ impl std::ops::Mul for Rotor {
     }
 }
 
-impl Rotor {
-    pub fn norm_sqr(&self) -> f32 {
-        self._1 * self._1 + self.yx * self.yx + self.zy * self.zy + self.xz * self.xz
+impl AddAssign for Rotor {
+    fn add_assign(&mut self, rhs: Self) {
+        self._1 += rhs._1;
+        self.yx += rhs.yx;
+        self.zy += rhs.zy;
+        self.xz += rhs.xz;
     }
 }
+
+impl DivAssign<f32> for Rotor {
+    fn div_assign(&mut self, rhs: f32) {
+        self._1 /= rhs;
+        self.yx /= rhs;
+        self.zy /= rhs;
+        self.xz /= rhs;
+    }
+}
+
