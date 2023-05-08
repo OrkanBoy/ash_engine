@@ -2,7 +2,7 @@ use std::ffi::CString;
 
 use ash::vk::{self, ShaderStageFlags};
 
-use crate::vertex;
+use crate::data;
 
 pub fn new_pipeline(
     device: &ash::Device,
@@ -50,8 +50,8 @@ pub fn new_pipeline(
 
 
     let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
-        .vertex_binding_descriptions(&vertex::get_binding_descs())
-        .vertex_attribute_descriptions(&vertex::get_attrib_descs())
+        .vertex_binding_descriptions(&data::get_binding_descs())
+        .vertex_attribute_descriptions(&data::get_attrib_descs())
         .build();
 
     let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
@@ -119,17 +119,11 @@ pub fn new_pipeline(
         .blend_constants([0.0, 0.0, 0.0, 0.0])
         .build();
 
-    let push_constant_range = vk::PushConstantRange::builder()
-        .stage_flags(ShaderStageFlags::VERTEX)
-        .size(std::mem::size_of::<PushConstantData>() as u32)
-        .build();
-    let push_constant_ranges = [push_constant_range];
-
     let descriptor_set_layouts = [descriptor_set_layout];
     let layout = {
         let layout_info = vk::PipelineLayoutCreateInfo::builder()
-            .set_layouts(&descriptor_set_layouts)
-            .push_constant_ranges(&push_constant_ranges);
+            .set_layouts(&descriptor_set_layouts);
+            //.push_constant_ranges(&push_constant_ranges);
 
 
         unsafe {
@@ -165,7 +159,7 @@ pub fn new_pipeline(
 
 //maybe use 4 x 3 matrices
 pub struct PushConstantData {
-    pub model: crate::math::TransformMat,
+    pub model: crate::math::ModelMat,
 }
 
 impl PushConstantData {

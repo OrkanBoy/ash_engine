@@ -1,19 +1,19 @@
 pub mod debug;
-pub mod vertex;
+pub mod data;
 pub mod buffer;
-pub mod texture;
 pub mod math;
 pub mod device;
 pub mod swapchain;
 pub mod pipeline;
 pub mod descriptor;
-pub mod game_object;
+pub mod instance;
 
 use buffer::Buffer;
+use cgmath::Vector3;
+use data::VertexData;
 use descriptor::UniformBufferObject;
+use instance::Particle;
 use pipeline::PushConstantData;
-use vertex::Vertex;
-use texture::Texture;
 
 use raw_window_handle::{
     HasRawDisplayHandle, 
@@ -23,7 +23,6 @@ use std::{
     ffi::CString, 
     rc::Rc, 
     time, 
-    f32::consts::FRAC_PI_2
 };
 
 use winit::{
@@ -42,8 +41,7 @@ use ash::{
         self, 
         SampleCountFlags, 
         AttachmentLoadOp, 
-        AttachmentStoreOp, 
-        BufferUsageFlags,
+        AttachmentStoreOp,
     },
     extensions::{
         khr::{
@@ -55,32 +53,11 @@ use ash::{
     },
 };
 
+use crate::math::Vector;
+
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
-const VERTICES: [Vertex; 4] = [
-    Vertex {
-        pos: [-0.5, -0.5, 0.0],
-        color: [1.0, 0.0, 0.0],
-    },
-    Vertex {
-        pos: [0.5, -0.5, 0.0],
-        color: [0.0, 1.0, 1.0],
-    },
-    Vertex {
-        pos: [0.5, 0.5, 0.0],
-        color: [0.0, 0.0, 1.0],
-    },
-    Vertex {
-        pos: [-0.5, 0.5, 0.0],
-        color: [0.0, 1.0, 0.0],
-    },
-];
-const INDICES: [u16; 6] = [0, 2, 1, 0, 3, 2];
-
-struct App {
-
-}
 
 struct VkApp {
     camera: Camera,
@@ -97,6 +74,9 @@ struct VkApp {
 
     physical_device: vk::PhysicalDevice,
     device: Rc<ash::Device>,
+
+    physical_device_mem_props: vk::PhysicalDeviceMemoryProperties,
+
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
@@ -124,9 +104,18 @@ struct VkApp {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
 
-    vertex_buffer: Buffer<Vertex>,
+    vertex_buffer: Buffer<data::VertexData>,
+    vertex_count: usize,
+
     index_buffer: Buffer<u16>,
-    uniform_buffer: Buffer<UniformBufferObject>,
+    index_count: usize,
+
+    per_frame_uniform_buffer: Buffer<UniformBufferObject>,
+
+    particles: Vec<instance::Particle>,
+    particle_instance_buffer: Buffer<data::InstanceData>,
+    particle_instance_count: usize,
+    particle_instances: Vec<instance::Instance>,
 
     current_frame: usize,
 }
@@ -206,7 +195,7 @@ impl VkApp {
             swapchain_extent,
         );
 
-        let memory_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let physical_device_mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
         let transient_command_pool = Self::new_command_pool(
             vk::CommandPoolCreateFlags::TRANSIENT,
@@ -217,31 +206,40 @@ impl VkApp {
             physical_device,
         );
         
-        let vertex_buffer = Buffer::new_local_with_data::<u32>(
-            &VERTICES,
-            BufferUsageFlags::VERTEX_BUFFER,
-            graphics_queue,
-            transient_command_pool,
+        const MAX_VERTICES_COUNT: usize = 100;
+        const MAX_INDICES_COUNT: usize = 100;
+        const MAX_PARTICLES_INSTANCE_COUNT: usize = 40 * 40 * 40;
+        let vertex_buffer = Buffer::new(
+            MAX_VERTICES_COUNT,
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
             device.clone(),
-            &memory_props,
+            &physical_device_mem_props,
         );
-        let index_buffer = Buffer::new_local_with_data::<u16>(
-            &INDICES,
-            BufferUsageFlags::INDEX_BUFFER,
-            graphics_queue,
-            transient_command_pool,
+        let index_buffer = Buffer::new(
+            MAX_INDICES_COUNT,
+            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
             device.clone(),
-            &memory_props,
+            &physical_device_mem_props,
         );
-        let uniform_buffer = Buffer::new(
+        let per_frame_uniform_buffer = Buffer::new(
             MAX_FRAMES_IN_FLIGHT,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             device.clone(),
-            &memory_props,
+            &physical_device_mem_props,
         );
+        let particle_instance_buffer = Buffer::new(
+            MAX_PARTICLES_INSTANCE_COUNT,
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            device.clone(),
+            &physical_device_mem_props,
+        );
+
         let descriptor_pool = descriptor::new_descriptor_pool(&device, 1);
-        let descriptor_set = descriptor::new_descriptor_set(&device, descriptor_pool, descriptor_set_layout, &uniform_buffer);
+        let descriptor_set = descriptor::new_descriptor_set(&device, descriptor_pool, descriptor_set_layout, &per_frame_uniform_buffer);
 
         let command_pool = Self::new_command_pool(
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
@@ -259,13 +257,13 @@ impl VkApp {
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) = Self::new_sync_objects(&device);
 
         let camera = Camera {
-            x: 0.0, y: 0.0, z: 0.0,
+            x: 0.0, y: 0.0, z: -4.0,
             x_z_angle: 0.0,
             xz_y_angle: 0.0,
             near_z: 1.0,
-            far_z: 10.0,
+            far_z: 100.0,
         };
-
+        
         Self {
             camera,
 
@@ -281,6 +279,9 @@ impl VkApp {
 
             physical_device,
             device,
+
+            physical_device_mem_props,
+
             graphics_queue,
             present_queue,
 
@@ -309,8 +310,24 @@ impl VkApp {
             in_flight_fences,
 
             vertex_buffer,
+            vertex_count: 0,
+
             index_buffer,
-            uniform_buffer,
+            index_count: 0,
+
+            per_frame_uniform_buffer,
+
+            particle_instance_buffer, 
+            particle_instance_count: 0,
+            particles: vec![],
+            particle_instances: vec![ //doesn't matter exact value
+                instance::Instance {
+                    scale: math::Vector::new(1.0, 1.0, 1.0),
+                    rotation: math::Bivector::new(0.0, 0.0, 0.0).exp(), 
+                    translation: math::Vector::new(0.0, 0.0, 0.0),
+                };
+                MAX_PARTICLES_INSTANCE_COUNT
+            ],
 
             current_frame: 0,
         }
@@ -481,7 +498,7 @@ impl VkApp {
     fn update_uniform_buffer(&mut self) {
         let elapsed = self.start_instant.elapsed().as_secs_f32();
 
-        let mut view = math::TransformMat::identity();
+        let mut view = math::ModelMat::identity();
 
         let plane = math::Vector::new(0.0, -1.0, 0.0)
             .wedge(
@@ -505,7 +522,109 @@ impl VkApp {
         };
         let ubos = [ubo];
 
-        self.uniform_buffer.copy_from_slice::<f32>(&ubos, self.current_frame);
+        self.per_frame_uniform_buffer.copy_from_slice::<f32>(&ubos, self.current_frame);
+    }
+
+    fn load_particle(
+        &mut self, 
+        vertices: &[data::VertexData],
+        indices: &[u16],
+        max_instance_count: usize,
+    ) -> usize {
+        use instance::BufferSlice;
+
+        let id = self.particles.len();
+
+        self.particles.push(
+            Particle { 
+                vertex_slice: BufferSlice {
+                    index: self.vertex_count,
+                    count: vertices.len(),
+                }, 
+                index_slice: BufferSlice {
+                    index: self.index_count,
+                    count: indices.len(),
+                },
+                instance_slice: BufferSlice {
+                    index: self.particle_instance_count,
+                    count: 0,
+                },
+                instance_slice_max_count: max_instance_count,
+            }
+        );
+
+        self.vertex_buffer.stage_and_copy_from_slice::<f32>(
+            vertices,
+            self.vertex_count,
+            self.graphics_queue,
+            self.transient_command_pool,
+            &self.physical_device_mem_props,
+        );
+        self.index_buffer.stage_and_copy_from_slice::<u16>(
+            indices,
+            self.index_count,
+            self.graphics_queue,
+            self.transient_command_pool,
+            &self.physical_device_mem_props,
+        );
+
+        self.vertex_count += vertices.len();
+        self.index_count += indices.len();
+        self.particle_instance_count += max_instance_count;
+
+        id
+    }
+
+    fn load_particle_instances(
+        &mut self,
+        particle_id: usize,
+        particle_instances_count: usize,
+    ) -> Vec<usize> {
+        let particle = &mut self.particles[particle_id];
+
+        let old_particle_instance_count = particle.instance_slice.count;
+
+        particle.instance_slice.count += particle_instances_count;  
+        if particle.instance_slice.count > particle.instance_slice_max_count {
+            panic!(
+                "Particle instances count {} exceeded {} allowed for particle {}", 
+                particle.instance_slice.count,
+                particle.instance_slice_max_count,
+                particle_id
+            );
+        }
+
+        let particle_instance_ids = 
+            particle.instance_slice.index + old_particle_instance_count.. 
+            particle.instance_slice.index + particle.instance_slice.count;
+        particle_instance_ids.collect()
+    }
+
+    fn update_particle_instance_buffer(&mut self) {
+        if self.particle_instance_count == 0 { 
+            return
+        }
+
+        let mut particle_instances_data = Vec::with_capacity(self.particle_instance_count);
+        let mut particle_instance_id = 0;
+        for p in self.particles.iter() {
+            for _ in 0..p.instance_slice_max_count {
+                particle_instances_data.push(
+                    data::InstanceData {
+                        model: self.particle_instances[particle_instance_id].calc_model_mat(),
+                    }
+                );
+                particle_instance_id += 1;
+            }
+        }
+
+        self.particle_instance_buffer.stage_and_copy_from_slice::<f32>(
+            &particle_instances_data, 
+            0,
+        self.graphics_queue,
+            self.transient_command_pool,
+            &self.physical_device_mem_props,
+        );
     }
 
     fn record_command_buffer(
@@ -562,28 +681,31 @@ impl VkApp {
             self.device.cmd_set_viewport(command_buffer, 0, &[viewport]);
             self.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
 
-            self.device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.vertex_buffer.handle], &[0]);
+            self.device.cmd_bind_vertex_buffers(command_buffer, data::VERTEX_BINDING, &[self.vertex_buffer.handle], &[0]);
+
+            self.device.cmd_bind_vertex_buffers(command_buffer, data::INSTANCE_BINDING, &[self.particle_instance_buffer.handle], &[0]);
+
             self.device.cmd_bind_index_buffer(command_buffer, self.index_buffer.handle, 0, vk::IndexType::UINT16);
+
             self.device.cmd_bind_descriptor_sets(
                 command_buffer, 
                 vk::PipelineBindPoint::GRAPHICS, 
                 self.pipeline_layout, 
-                0, &[self.descriptor_set], &[]);
-            
-            
-            let push_data = pipeline::PushConstantData {
-                model: *math::TransformMat::identity().translate(0.0, 0.0, 4.0),
-            };
-
-            self.device.cmd_push_constants(
-                command_buffer, 
-                self.pipeline_layout, 
-                vk::ShaderStageFlags::VERTEX, 
                 0, 
-                push_data.as_bytes(),
+                &[self.descriptor_set], 
+                &[]
             );
 
-            self.device.cmd_draw_indexed(command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
+            for particle in self.particles.iter() {
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    particle.index_slice.count as u32, 
+                    particle.instance_slice.count as u32,
+                    particle.index_slice.index as u32,
+                    particle.vertex_slice.index as i32,
+                    particle.instance_slice.index as u32,
+                )
+            }
 
             self.device.cmd_end_render_pass(command_buffer);
 
@@ -624,9 +746,12 @@ impl VkApp {
                 vk::CommandBufferResetFlags::empty()
             ).expect("Failed to reset command buffer contents"); 
         }
+
         self.record_command_buffer(command_buffer, image_index as usize);
 
         self.update_uniform_buffer();
+
+        self.update_particle_instance_buffer();
 
         //render
         {
@@ -639,6 +764,7 @@ impl VkApp {
             let render_infos = [render_info];
 
             unsafe { self.device.queue_submit(self.graphics_queue, &render_infos, in_flight_fence).unwrap(); }
+
         }
 
         //present
@@ -670,7 +796,8 @@ impl Drop for VkApp {
 
         self.vertex_buffer.destroy();
         self.index_buffer.destroy();
-        self.uniform_buffer.destroy();
+        self.per_frame_uniform_buffer.destroy();
+        self.particle_instance_buffer.destroy();
 
         unsafe {
             self.device.destroy_descriptor_pool(self.descriptor_pool, None);
@@ -703,7 +830,9 @@ impl Drop for VkApp {
     }
 }
 
+
 fn main() {
+    //app init
     env_logger::init();
 
     let event_loop = EventLoop::new();
@@ -712,13 +841,73 @@ fn main() {
         .with_inner_size(PhysicalSize {width: WIDTH, height: HEIGHT})
         .build(&event_loop)
         .unwrap();
-
     let mut app = VkApp::new(&window);
-    let mut dirty_swapchain = false;
 
+
+    let triangle_vertices1 = [
+        VertexData {
+            pos: [-0.5, -0.5, 0.0],
+            color: [0.5, 1.0, 0.0],
+        },
+        VertexData {
+            pos: [0.5, -0.5, 0.0],
+            color: [0.0, 0.5, 1.0],
+        },
+        VertexData {
+            pos: [0.5, 0.5, 0.0],
+            color: [1.0, 0.0, 1.0],
+        },
+    ];
+    let triangle_indices1 = [
+        0, 2, 1,
+    ];
+
+    let triangle_vertices2 = [
+        VertexData {
+            pos: [-0.2, -0.5, 1.0],
+            color: [0.3, 1.0, 0.0],
+        },
+        VertexData {
+            pos: [0.5, -0.5, 0.3],
+            color: [0.0, 0.3, 1.0],
+        },
+        VertexData {
+            pos: [0.5, 0.5, 0.0],
+            color: [0.7, 0.0, 0.2],
+        },
+    ];
+    let triangle_indices2 = [
+        0, 2, 1,
+    ];
+
+    let particle_cube_size = 15;
+    let particle_count = particle_cube_size * particle_cube_size * particle_cube_size;
+
+    let id1 = app.load_particle(&triangle_vertices1, &triangle_indices1, particle_count / 2);
+    app.load_particle_instances(id1, particle_count / 2);
+
+    let id2 = app.load_particle(&triangle_vertices2, &triangle_indices2, particle_count / 2);
+    app.load_particle_instances(id2, particle_count / 2);
+
+    for x in 0..particle_cube_size {
+        let fx = x as f32;
+        for y in 0..particle_cube_size {
+            let fy = y as f32;
+            for z in 0..particle_cube_size {
+                let fz = z as f32;
+
+                let p = &mut app.particle_instances[x + particle_cube_size * y + particle_cube_size * particle_cube_size * z];
+                p.translation = math::Vector::new(fx, fy, fz);
+                p.rotation = math::Bivector::new(fx * 0.1, fy * 0.1, fz * 0.1).exp();
+            }
+        }
+    }
+
+
+    //running app
+    let mut dirty_swapchain = false;
     use winit::{event_loop::ControlFlow, event::Event};
 
-    //TODO: update swapchain brief period after resizing stopped
     event_loop.run(move |system_event, _, control_flow| {
         match system_event {
             Event::MainEventsCleared => {

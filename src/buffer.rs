@@ -58,7 +58,11 @@ impl<T: Copy> Buffer<T> {
         }
     }
 
-    pub fn copy_from_slice<A>(&mut self, slice: &[T], start_index: usize) {
+    pub fn copy_from_slice<A>(
+        &mut self, 
+        slice: &[T], 
+        start_index: usize
+    ) {
         unsafe {
             let mapped_ptr = self.device.map_memory(
                 self.memory, 
@@ -77,6 +81,7 @@ impl<T: Copy> Buffer<T> {
     pub fn copy_from_buffer(
         &mut self, 
         src: &Self,
+        start_index: usize,
         count: usize,
         transfer_queue: vk::Queue,
         command_pool: vk::CommandPool,
@@ -103,7 +108,7 @@ impl<T: Copy> Buffer<T> {
             let regions = [
                 vk::BufferCopy {
                     src_offset: 0,
-                    dst_offset: 0,
+                    dst_offset: start_index as vk::DeviceSize * self.size_of_t,
                     size: self.size_of_t * count as vk::DeviceSize,
                 }
             ];
@@ -130,54 +135,33 @@ impl<T: Copy> Buffer<T> {
         unsafe { self.device.free_command_buffers(command_pool, &command_buffers); }
     }
 
-    pub fn new_local_with_data<A>(
+    pub fn stage_and_copy_from_slice<A>(
+        &mut self,
         data: &[T],
-        usage: vk::BufferUsageFlags,
+        start_index: usize,
         transfer_queue: vk::Queue,
         command_pool: vk::CommandPool,
-        device: Rc<ash::Device>,
         device_mem_props: &vk::PhysicalDeviceMemoryProperties,
-    ) -> Buffer<T> {
+    ) {
         let mut staging_buffer = Self::new(
             data.len(),
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            Rc::clone(&device),
+            self.device.clone(),
             device_mem_props,
         );
 
-        unsafe {
-            let memory_ptr = device.map_memory(
-                staging_buffer.memory, 
-                0, 
-                staging_buffer.size, 
-                vk::MemoryMapFlags::empty()
-            ).expect("Failed to obtain CPU pointer to GPU memory");
+        staging_buffer.copy_from_slice::<A>(data, 0);
 
-            let mut align = ash::util::Align::new(memory_ptr, std::mem::align_of::<A>() as _, staging_buffer.size);
-            align.copy_from_slice(data);
-
-            device.unmap_memory(staging_buffer.memory);
-        }
-
-        let mut buffer = Buffer::new(
-            data.len(),
-            usage | vk::BufferUsageFlags::TRANSFER_DST,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL, 
-            Rc::clone(&device), 
-            device_mem_props,
-        );
-
-        buffer.copy_from_buffer(
+        self.copy_from_buffer(
             &staging_buffer,
+            start_index,
             data.len(),
             transfer_queue,
             command_pool,
         );
 
         staging_buffer.destroy();
-
-        buffer
     }
 
     fn find_mem_type_index(
