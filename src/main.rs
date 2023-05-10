@@ -10,15 +10,13 @@ pub mod instance;
 
 use buffer::Buffer;
 use data::VertexData;
-use descriptor::UniformBufferObject;
 use instance::Particle;
-use pipeline::PushConstantData;
 
 use raw_window_handle::{
     HasRawDisplayHandle, 
     HasRawWindowHandle,
 };
-use winapi::um::wingdi::GetRandomRgn;
+
 use std::{
     ffi::CString, 
     rc::Rc, 
@@ -56,6 +54,9 @@ use ash::{
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
+const MAX_VERTICES_COUNT: usize = 100;
+const MAX_INDICES_COUNT: usize = 100;
+const MAX_PARTICLES_INSTANCE_COUNT: usize = 40;
 
 struct VkApp {
     camera: Camera,
@@ -76,6 +77,7 @@ struct VkApp {
     physical_device_mem_props: vk::PhysicalDeviceMemoryProperties,
 
     graphics_queue: vk::Queue,
+    transfer_queue: vk::Queue,
     present_queue: vk::Queue,
 
     swapchain: Swapchain, 
@@ -94,9 +96,10 @@ struct VkApp {
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
 
-    transient_command_pool: vk::CommandPool,
-    command_pool: vk::CommandPool,
-    command_buffers: Vec<vk::CommandBuffer>,
+    graphics_command_pool: vk::CommandPool,
+    graphics_command_buffers: Vec<vk::CommandBuffer>,
+    transfer_command_pool: vk::CommandPool,
+    transfer_command_buffers: Vec<vk::CommandBuffer>,
 
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
@@ -104,16 +107,19 @@ struct VkApp {
 
     vertex_buffer: Buffer<data::VertexData>,
     vertex_count: usize,
+    vertex_transfer_fence: vk::Fence,
 
     index_buffer: Buffer<u16>,
     index_count: usize,
+    index_transfer_fence: vk::Fence,
 
-    per_frame_uniform_buffer: Buffer<UniformBufferObject>,
+    per_frame_uniform_buffer: Buffer<descriptor::UniformData>,
 
     particles: Vec<instance::Particle>,
-    particle_instance_buffer: Buffer<data::InstanceData>,
+    particle_per_frame_instance_buffer: Buffer<data::InstanceData>,
     particle_instance_count: usize,
     particle_instances: Vec<instance::Instance>,
+    particle_instance_transfer_fences: Vec<vk::Fence>,
 
     current_frame: usize,
 }
@@ -145,12 +151,41 @@ impl VkApp {
 
         let (device, 
             graphics_queue, 
-            present_queue
+            present_queue,
+            transfer_queue,
         ) = device::new_logical_device_and_queues(
             &instance, 
             &surface, 
             surface_khr, 
             physical_device,
+        );
+
+        let (
+            graphics, 
+            transfer,
+            _,
+        ) = device::find_queue_family_indices(physical_device, &surface, surface_khr, &instance);
+
+        let graphics = graphics.unwrap();
+        let transfer = transfer.unwrap();
+
+        let graphics_command_pool = Self::new_command_pool(
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            graphics,
+            &device,
+        );
+        let graphics_command_buffers = Self::new_command_buffers(
+            &device, 
+            graphics_command_pool, 
+        );
+        let transfer_command_pool = Self::new_command_pool(
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            transfer,
+            &device,
+        );
+        let transfer_command_buffers = Self::new_command_buffers(
+            &device, 
+            transfer_command_pool, 
         );
 
         let (swapchain, 
@@ -160,8 +195,8 @@ impl VkApp {
             swapchain_extent
         ) = swapchain::new_swapchain_and_images(
             &instance, 
-            physical_device, 
-            &device, 
+            physical_device,
+            &device,
             &surface, 
             surface_khr, 
             vk::Extent2D{width: WIDTH, height: HEIGHT}
@@ -194,19 +229,7 @@ impl VkApp {
         );
 
         let physical_device_mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-
-        let transient_command_pool = Self::new_command_pool(
-            vk::CommandPoolCreateFlags::TRANSIENT,
-            device.clone(), 
-            &instance, 
-            &surface, 
-            surface_khr, 
-            physical_device,
-        );
         
-        const MAX_VERTICES_COUNT: usize = 100;
-        const MAX_INDICES_COUNT: usize = 100;
-        const MAX_PARTICLES_INSTANCE_COUNT: usize = 40;
         let vertex_buffer = Buffer::new(
             MAX_VERTICES_COUNT,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
@@ -228,8 +251,8 @@ impl VkApp {
             device.clone(),
             &physical_device_mem_props,
         );
-        let particle_instance_buffer = Buffer::new(
-            MAX_PARTICLES_INSTANCE_COUNT,
+        let particle_per_frame_instance_buffer = Buffer::new(
+            MAX_PARTICLES_INSTANCE_COUNT * MAX_FRAMES_IN_FLIGHT,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             device.clone(),
@@ -239,20 +262,15 @@ impl VkApp {
         let descriptor_pool = descriptor::new_descriptor_pool(&device, 1);
         let descriptor_set = descriptor::new_descriptor_set(&device, descriptor_pool, descriptor_set_layout, &per_frame_uniform_buffer);
 
-        let command_pool = Self::new_command_pool(
-            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            device.clone(), 
-            &instance, 
-            &surface, 
-            surface_khr, 
-            physical_device,
-        );
-        let command_buffers = Self::new_command_buffers(
-            &device, 
-            command_pool, 
-        );
+        let (
+            image_available_semaphores, 
+            render_finished_semaphores, 
+            in_flight_fences,
+            vertex_transfer_fence,
+            index_transfer_fence,
+            particle_instance_transfer_fences,
+        ) = Self::new_sync_objects(&device);
 
-        let (image_available_semaphores, render_finished_semaphores, in_flight_fences) = Self::new_sync_objects(&device);
 
         let camera = Camera {
             x: 0.0, y: 0.0, z: -4.0,
@@ -283,6 +301,7 @@ impl VkApp {
             physical_device_mem_props,
 
             graphics_queue,
+            transfer_queue,
             present_queue,
 
             swapchain,
@@ -301,9 +320,10 @@ impl VkApp {
             pipeline_layout,
             pipeline,
 
-            transient_command_pool,
-            command_pool,
-            command_buffers,
+            transfer_command_pool,
+            graphics_command_pool,
+            graphics_command_buffers,
+            transfer_command_buffers,
 
             image_available_semaphores,
             render_finished_semaphores,
@@ -311,14 +331,17 @@ impl VkApp {
 
             vertex_buffer,
             vertex_count: 0,
+            vertex_transfer_fence,
 
             index_buffer,
             index_count: 0,
+            index_transfer_fence,
 
             per_frame_uniform_buffer,
 
-            particle_instance_buffer, 
+            particle_per_frame_instance_buffer, 
             particle_instance_count: 0,
+            particle_instance_transfer_fences,
             particles: vec![],
             particle_instances: vec![ //doesn't matter exact value
                 instance::Instance {
@@ -336,11 +359,22 @@ impl VkApp {
     }
 
     fn renew_swapchain(&mut self) {
-        unsafe { self.device.device_wait_idle().unwrap(); }
-
         self.cleanup_swapchain();
 
-        (self.swapchain, self.swapchain_khr, self.swapchain_images, self.swapchain_image_format, self.swapchain_extent) = swapchain::new_swapchain_and_images(&self.instance, self.physical_device, &self.device, &self.surface, self.surface_khr, self.swapchain_extent);
+        (
+            self.swapchain, 
+            self.swapchain_khr, 
+            self.swapchain_images, 
+            self.swapchain_image_format, 
+            self.swapchain_extent
+        ) = swapchain::new_swapchain_and_images(
+            &self.instance, 
+            self.physical_device, 
+            &self.device, 
+            &self.surface, 
+            self.surface_khr, 
+            self.swapchain_extent
+        );
 
         self.swapchain_image_views = swapchain::new_swapchain_image_views(&self.device, &self.swapchain_images, self.swapchain_image_format);
 
@@ -349,6 +383,7 @@ impl VkApp {
     
     fn cleanup_swapchain(&mut self) {
         unsafe {
+            //TODO:  = no good
             self.device.device_wait_idle().unwrap();
 
             for i in 0..self.swapchain_images.len() {
@@ -365,27 +400,50 @@ impl VkApp {
         Vec<vk::Semaphore>, 
         Vec<vk::Semaphore>,
         Vec<vk::Fence>,
+        vk::Fence,
+        vk::Fence,
+        Vec<vk::Fence>,
     ) {
         let mut image_available_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut in_flight_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
+        let mut particle_instance_transfer_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    
+        let semaphore_info = &vk::SemaphoreCreateInfo::builder();
+        let fence_info = &vk::FenceCreateInfo::builder()
+            .flags(vk::FenceCreateFlags::SIGNALED);
+
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            image_available_semaphores.push({
-                let info = vk::SemaphoreCreateInfo::builder();
-                unsafe { device.create_semaphore(&info, None).unwrap() }
-            });
-            render_finished_semaphores.push({
-                let info = vk::SemaphoreCreateInfo::builder();
-                unsafe { device.create_semaphore(&info, None).unwrap() }
-            });
-            in_flight_fences.push({
-                let info = vk::FenceCreateInfo::builder()
-                    .flags(vk::FenceCreateFlags::SIGNALED);
-                unsafe { device.create_fence(&info, None).unwrap() }
-            })
+            image_available_semaphores.push(
+                unsafe { device.create_semaphore(semaphore_info, None).unwrap() }
+            );
+            render_finished_semaphores.push(
+                unsafe { device.create_semaphore(semaphore_info, None).unwrap() }
+            );
+            in_flight_fences.push(
+                unsafe { device.create_fence(fence_info, None).unwrap() }
+            );
+
+            particle_instance_transfer_fences.push(
+                unsafe { device.create_fence(fence_info, None).unwrap() }
+            );
         }
-        (image_available_semaphores, render_finished_semaphores, in_flight_fences)
+
+        let vertex_transfer_fence = unsafe { device.create_fence(
+            &vk::FenceCreateInfo::builder()
+            , None).unwrap() };
+        let index_transfer_fence = unsafe { device.create_fence(&vk::FenceCreateInfo::builder()
+            , None).unwrap() };
+
+        (
+            image_available_semaphores, 
+            render_finished_semaphores, 
+            in_flight_fences,
+            vertex_transfer_fence,
+            index_transfer_fence,
+            particle_instance_transfer_fences,
+        )
     }
 
     fn new_command_buffers(
@@ -403,16 +461,11 @@ impl VkApp {
 
     fn new_command_pool(
         create_flags: vk::CommandPoolCreateFlags,
-        device: Rc<ash::Device>, 
-        instance: &ash::Instance,
-        surface: &Surface, 
-        surface_khr: vk::SurfaceKHR, 
-        physical_device: vk::PhysicalDevice
+        queue_family_index: u32,
+        device: &ash::Device,
     ) -> vk::CommandPool {
-        let (graphics, _) = device::find_queue_families(physical_device, surface, surface_khr, instance);
-
         let info = vk::CommandPoolCreateInfo::builder()
-            .queue_family_index(graphics.unwrap())
+            .queue_family_index(queue_family_index)
             .flags(create_flags);
 
         unsafe { device.create_command_pool(&info, None).expect("Failed to create command pool") }
@@ -512,17 +565,16 @@ impl VkApp {
 
         let aspect_ratio = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
         
-        let ubo = UniformBufferObject {
-            view_proj: math::project(
+        let uniform_data = descriptor::UniformData {
+            proj_view: math::project(
                 view,
                 aspect_ratio,
                 self.camera.near_z,
                 self.camera.far_z,
             ),
         };
-        let ubos = [ubo];
 
-        self.per_frame_uniform_buffer.copy_from_slice::<f32>(&ubos, self.current_frame);
+        self.per_frame_uniform_buffer.copy_from_slice::<f32>(&[uniform_data], self.current_frame);
     }
 
     fn load_particle(
@@ -534,6 +586,7 @@ impl VkApp {
         use instance::BufferSlice;
 
         let id = self.particles.len();
+        let transfer_command_buffer: vk::CommandBuffer = self.transfer_command_buffers[self.current_frame];
 
         self.particles.push(
             Particle { 
@@ -556,17 +609,26 @@ impl VkApp {
         self.vertex_buffer.stage_and_copy_from_slice::<f32>(
             vertices,
             self.vertex_count,
-            self.graphics_queue,
-            self.transient_command_pool,
+            self.transfer_queue,
+            self.vertex_transfer_fence,
+            transfer_command_buffer,
             &self.physical_device_mem_props,
         );
+
+        self.wait_for_and_reset_fences(&[self.vertex_transfer_fence]);
+        self.reset_command_buffer(transfer_command_buffer);
+
         self.index_buffer.stage_and_copy_from_slice::<u16>(
             indices,
             self.index_count,
-            self.graphics_queue,
-            self.transient_command_pool,
+            self.transfer_queue,
+            self.index_transfer_fence,
+            transfer_command_buffer,
             &self.physical_device_mem_props,
         );
+
+        self.wait_for_and_reset_fences(&[self.index_transfer_fence]);
+        self.reset_command_buffer(transfer_command_buffer);
 
         self.vertex_count += vertices.len();
         self.index_count += indices.len();
@@ -623,18 +685,19 @@ impl VkApp {
             }
         }
 
-        self.particle_instance_buffer.stage_and_copy_from_slice::<f32>(
+        self.particle_per_frame_instance_buffer.stage_and_copy_from_slice::<f32>(
             &particle_instances_data, 
-            0,
-        self.graphics_queue,
-            self.transient_command_pool,
+            MAX_PARTICLES_INSTANCE_COUNT * self.current_frame,
+            self.transfer_queue,
+            self.particle_instance_transfer_fences[self.current_frame],
+            self.transfer_command_buffers[self.current_frame],
             &self.physical_device_mem_props,
-        );
+        )
     }
 
-    fn record_command_buffer(
+    fn record_graphics_command_buffer(
         &mut self, 
-        command_buffer: vk::CommandBuffer,
+        graphics_command_buffer: vk::CommandBuffer,
         image_index: usize,
     ) {
         let begin_info = vk::CommandBufferBeginInfo::default();
@@ -677,23 +740,54 @@ impl VkApp {
         };
 
         unsafe { 
-            self.device.begin_command_buffer(command_buffer, &begin_info).expect("Failed to begin recording command buffer");
+            self.device.begin_command_buffer(
+                graphics_command_buffer, 
+                &begin_info
+            ).expect("Failed to begin recording command buffer");
+            self.device.cmd_begin_render_pass(
+                graphics_command_buffer, 
+                &render_pass_begin_info, 
+                vk::SubpassContents::INLINE
+            );
 
-            self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
+            self.device.cmd_bind_pipeline(
+                graphics_command_buffer, 
+                vk::PipelineBindPoint::GRAPHICS, 
+                self.pipeline
+            );
 
-            self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            self.device.cmd_set_viewport(
+                graphics_command_buffer, 
+                0, 
+                &[viewport]
+            );
+            self.device.cmd_set_scissor(
+                graphics_command_buffer, 
+                0, 
+                &[scissor]
+            );
 
-            self.device.cmd_set_viewport(command_buffer, 0, &[viewport]);
-            self.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
-
-            self.device.cmd_bind_vertex_buffers(command_buffer, data::VERTEX_BINDING, &[self.vertex_buffer.handle], &[0]);
-
-            self.device.cmd_bind_vertex_buffers(command_buffer, data::INSTANCE_BINDING, &[self.particle_instance_buffer.handle], &[0]);
-
-            self.device.cmd_bind_index_buffer(command_buffer, self.index_buffer.handle, 0, vk::IndexType::UINT16);
+            self.device.cmd_bind_vertex_buffers(
+                graphics_command_buffer, 
+                data::VERTEX_BINDING, 
+                &[self.vertex_buffer.handle],
+                &[0]
+            );
+            self.device.cmd_bind_vertex_buffers(
+                graphics_command_buffer, 
+                data::INSTANCE_BINDING, 
+                &[self.particle_per_frame_instance_buffer.handle], 
+                &[0]
+            );
+            self.device.cmd_bind_index_buffer(
+                graphics_command_buffer, 
+                self.index_buffer.handle, 
+                0, 
+                vk::IndexType::UINT16
+            );
 
             self.device.cmd_bind_descriptor_sets(
-                command_buffer, 
+                graphics_command_buffer, 
                 vk::PipelineBindPoint::GRAPHICS, 
                 self.pipeline_layout, 
                 0, 
@@ -703,20 +797,37 @@ impl VkApp {
 
             for particle in self.particles.iter() {
                 self.device.cmd_draw_indexed(
-                    command_buffer,
+                    graphics_command_buffer,
                     particle.index_slice.count as u32, 
                     particle.instance_slice.count as u32,
                     particle.index_slice.index as u32,
                     particle.vertex_slice.index as i32,
-                    particle.instance_slice.index as u32,
+                    (particle.instance_slice.index + 
+                        self.current_frame * MAX_PARTICLES_INSTANCE_COUNT as usize
+                    ) as u32,
                 )
             }
 
-            self.device.cmd_end_render_pass(command_buffer);
-
-            self.device.end_command_buffer(command_buffer).expect("Could not end recording command buffer");
+            self.device.cmd_end_render_pass(graphics_command_buffer);
+            self.device.end_command_buffer(graphics_command_buffer).expect("Could not end recording command buffer");
         }
         
+    }
+
+    fn wait_for_and_reset_fences(&mut self, fences: &[vk::Fence]) {
+        unsafe {
+            self.device.wait_for_fences(fences, true, u64::MAX).unwrap();
+            self.device.reset_fences(fences).unwrap();
+        }
+    }
+
+    fn reset_command_buffer(&mut self, command_buffer: vk::CommandBuffer) {
+        unsafe {
+            self.device.reset_command_buffer(
+                command_buffer, 
+                vk::CommandBufferResetFlags::empty()
+            ).expect("Failed to reset command buffer contents"); 
+        }
     }
 
     fn draw_frame(&mut self) -> bool {
@@ -725,12 +836,18 @@ impl VkApp {
         let image_available_semaphore = self.image_available_semaphores[self.current_frame];
         let render_finished_semaphore = self.render_finished_semaphores[self.current_frame];
         let in_flight_fence = self.in_flight_fences[self.current_frame];
-        let command_buffer = self.command_buffers[self.current_frame];
+        let particle_instance_transfer_fence = self.particle_instance_transfer_fences[self.current_frame];
 
-        unsafe { 
-            self.device.wait_for_fences(&[in_flight_fence], true, u64::MAX).unwrap();
-            self.device.reset_fences(&[in_flight_fence]).unwrap();
-        }
+        let graphics_command_buffer = self.graphics_command_buffers[self.current_frame];
+        let transfer_command_buffer = self.transfer_command_buffers[self.current_frame];
+
+        self.wait_for_and_reset_fences(&
+            if self.particle_instance_count != 0 {
+                vec![in_flight_fence, particle_instance_transfer_fence]
+            } else {
+                vec![in_flight_fence]
+            }
+        );
 
         let image_index = unsafe {
             match self.swapchain.acquire_next_image(
@@ -745,23 +862,20 @@ impl VkApp {
             }
         };
 
-        unsafe { 
-            self.device.reset_command_buffer(
-                command_buffer, 
-                vk::CommandBufferResetFlags::empty()
-            ).expect("Failed to reset command buffer contents"); 
+        self.reset_command_buffer(graphics_command_buffer);
+        if self.particle_instance_count != 0 {
+            self.reset_command_buffer(transfer_command_buffer);
         }
-
-        self.record_command_buffer(command_buffer, image_index as usize);
 
         self.update_uniform_buffer();
 
         self.update_particle_instance_buffer();
 
         //render
+        self.record_graphics_command_buffer(graphics_command_buffer, image_index as usize);
         {
             let render_info = vk::SubmitInfo::builder()
-                .command_buffers(&[command_buffer])
+                .command_buffers(&[graphics_command_buffer])
                 .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
                 .wait_semaphores(&[image_available_semaphore])
                 .signal_semaphores(&[render_finished_semaphore])
@@ -807,15 +921,16 @@ impl VkApp {
                 color: [1.0, 0.0, 1.0],
             },
         ];
-        let triangle_indices1 = [
+        let triangle_indices = [
             0, 2, 1,
         ];
     
-        let id = self.load_particle(&triangle_vertices, &triangle_indices1, 2);
+        let id = self.load_particle(&triangle_vertices, &triangle_indices, 2);
         self.load_particle_instances(id, 2);
 
         self.particle_instances[0].translation = math::Vector::new(-1.0, 0.0, 0.0);
         self.particle_instances[1].translation = math::Vector::new(1.0, 0.0, 0.0);
+
     }
 
     pub fn update_game(&mut self, dt: f32) {
@@ -846,7 +961,7 @@ impl Drop for VkApp {
         self.vertex_buffer.destroy();
         self.index_buffer.destroy();
         self.per_frame_uniform_buffer.destroy();
-        self.particle_instance_buffer.destroy();
+        self.particle_per_frame_instance_buffer.destroy();
 
         unsafe {
             self.device.destroy_descriptor_pool(self.descriptor_pool, None);
@@ -856,14 +971,17 @@ impl Drop for VkApp {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.pipeline_layout, None);
 
+            self.device.destroy_fence(self.vertex_transfer_fence, None);
+            self.device.destroy_fence(self.index_transfer_fence, None);
             for i in 0..MAX_FRAMES_IN_FLIGHT {
                 self.device.destroy_semaphore(self.image_available_semaphores[i], None);
                 self.device.destroy_semaphore(self.render_finished_semaphores[i], None);
                 self.device.destroy_fence(self.in_flight_fences[i], None);
+                self.device.destroy_fence(self.particle_instance_transfer_fences[i], None);
             }
 
-            self.device.destroy_command_pool(self.transient_command_pool, None);
-            self.device.destroy_command_pool(self.command_pool, None);
+            self.device.destroy_command_pool(self.transfer_command_pool, None);
+            self.device.destroy_command_pool(self.graphics_command_pool, None);
 
             self.device.destroy_render_pass(self.render_pass, None);
 

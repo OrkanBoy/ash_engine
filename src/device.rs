@@ -24,37 +24,62 @@ pub fn is_physical_device_suitable(
     surface: &Surface, 
     surface_khr: vk::SurfaceKHR, 
     instance: &ash::Instance) -> bool {
-    let (graphics, present) = find_queue_families(physical_device, surface, surface_khr, &instance);
-    graphics.is_some() && present.is_some()
+    let (graphics, present, transfer) = find_queue_family_indices(physical_device, surface, surface_khr, &instance);
+    graphics.is_some() && present.is_some() && transfer.is_some()
 }
 
-pub fn find_queue_families(
+pub fn find_queue_family_indices(
     physical_device: vk::PhysicalDevice,
     surface: &Surface,
     surface_khr: vk::SurfaceKHR,
-    instance: &ash::Instance) -> (Option<u32>, Option<u32>) {
+    instance: &ash::Instance
+) -> (
+    Option<u32>, 
+    Option<u32>, 
+    Option<u32>
+) {
     let props = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
 
-    let mut graphics_index = None;
-    let mut present_index = None;
+    //fi: family_index
+    let mut graphics_fi = None;
+    let mut present_fi = None;
+    let mut transfer_fi = None;
 
-    for (index, family) in props.iter().filter(|p| p.queue_count > 0).enumerate() {
+    for (index, family_props) in props.iter().filter(|p| p.queue_count > 0).enumerate() {
         let index = index as u32;
 
-        if graphics_index.is_none() && family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-            graphics_index = Some(index);
+        if graphics_fi.is_none() && family_props.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+            graphics_fi = Some(index);
         }
 
-        let present_support = unsafe { surface.get_physical_device_surface_support(physical_device, index, surface_khr) }.unwrap();
-        if present_index.is_none() && present_support {
-            present_index = Some(index);
+        let present_support = unsafe { 
+            surface.get_physical_device_surface_support(
+                physical_device, 
+                index, 
+                surface_khr
+            ) 
+        }.unwrap();
+        if present_fi.is_none() && present_support {
+            present_fi = Some(index);
         }
 
-        if graphics_index.is_some() && present_index.is_some() {
-            break;
+        if (transfer_fi.is_none() && family_props.queue_flags.contains(vk::QueueFlags::TRANSFER)) || 
+            (graphics_fi.is_some() && graphics_fi.unwrap() != index) {
+            transfer_fi = Some(index)
+        }   
+
+        if graphics_fi.is_some() &&
+            present_fi.is_some() && 
+            transfer_fi.is_some() {
+                break;
         }
     }
-    (graphics_index, present_index)
+
+    (
+        graphics_fi, 
+        transfer_fi, 
+        present_fi
+    )
 }
 
 pub fn new_logical_device_and_queues(
@@ -62,16 +87,27 @@ pub fn new_logical_device_and_queues(
     surface: &Surface,
     surface_khr: vk::SurfaceKHR,
     physical_device: vk::PhysicalDevice
-) -> (Rc<ash::Device>, vk::Queue, vk::Queue) {
+) -> (
+    Rc<ash::Device>, 
+    vk::Queue, 
+    vk::Queue,
+    vk::Queue,
+) {
 
-    let (graphics_family_index, present_family_index) = find_queue_families(physical_device, surface, surface_khr, instance);
-    let graphics_family_index = graphics_family_index.unwrap();
-    let present_family_index = present_family_index.unwrap();
+    let (
+        graphics_fi, 
+        transfer_fi,
+        present_fi,
+    ) = find_queue_family_indices(physical_device, &surface, surface_khr, &instance);
+
+    let graphics_fi = graphics_fi.unwrap();
+    let transfer_fi = transfer_fi.unwrap();
+    let present_fi = present_fi.unwrap();
     
     let queue_priorities = [1.0];
 
     let queue_infos = {
-        let mut indices = vec![graphics_family_index, present_family_index];
+        let mut indices = vec![graphics_fi, present_fi, transfer_fi];
         indices.dedup();
 
         indices.iter().map(|&index| vk::DeviceQueueCreateInfo::builder()
@@ -99,10 +135,16 @@ pub fn new_logical_device_and_queues(
 
     unsafe {
         let device = instance.create_device(physical_device, &info, None).unwrap();
-        let graphics_queue = device.get_device_queue(graphics_family_index, 0);
-        let present_queue = device.get_device_queue(present_family_index, 0);
+        let graphics_queue = device.get_device_queue(graphics_fi, 0);
+        let present_queue = device.get_device_queue(present_fi, 0);
+        let transfer_queue = device.get_device_queue(transfer_fi, 0);
 
-        (Rc::from(device), graphics_queue, present_queue)
+        (
+            Rc::from(device), 
+            graphics_queue, 
+            present_queue, 
+            transfer_queue,
+        )
     }
 }
 

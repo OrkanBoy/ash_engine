@@ -1,13 +1,13 @@
 use ash::vk;
 
-use crate::buffer;
+use crate::{buffer, math};
 
 //TODO: update descriptor set managing system
-#[derive(Clone, Copy)]
-pub struct UniformBufferObject {
-    pub view_proj: crate::math::Mat,
-}
 
+#[derive(Clone, Copy)]
+pub struct  UniformData {
+    pub proj_view: math::Mat,
+}
 
 pub fn new_descriptor_pool(device: &ash::Device, size: usize) -> vk::DescriptorPool {
     let size = size as u32;
@@ -45,7 +45,7 @@ pub fn new_descriptor_set(
     device: &ash::Device,
     pool: vk::DescriptorPool,
     layout: vk::DescriptorSetLayout,
-    uniform_buffer: &buffer::Buffer<UniformBufferObject>,
+    uniform_buffer: &buffer::Buffer<UniformData>,
 ) -> vk::DescriptorSet {
     let layouts = [layout];
     let alloc_info = vk::DescriptorSetAllocateInfo::builder()
@@ -59,7 +59,7 @@ pub fn new_descriptor_set(
     let buffer_info = vk::DescriptorBufferInfo::builder()
             .buffer(uniform_buffer.handle)
             .offset(0)
-            .range(std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize)
+            .range(std::mem::size_of::<UniformData>() as vk::DeviceSize)
             .build();
     let buffer_infos = [buffer_info];
 

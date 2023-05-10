@@ -1,6 +1,7 @@
 use ash::vk;
 use crate::math::{self, Rotor};
 
+
 #[derive(Clone, Copy)]
 pub struct Instance {
     pub scale: math::Vector,
@@ -12,6 +13,7 @@ pub struct Instance {
 }
 
 impl Instance {
+    //Maybe use dual quat for realistic kinematics
     pub fn update_translation_kinematics(
         &mut self,
         translation_acceleration: math::Vector,
@@ -30,10 +32,6 @@ impl Instance {
         self.rotation += self.rotation_velocity * dt * self.rotation;
         self.rotation /= self.rotation.norm_sqr().sqrt(); //Find better way, sqrt is expensive
     }
-}
-
-pub struct  UniformData {
-    pub proj_view: math::Mat,
 }
 
 #[derive(Debug)]

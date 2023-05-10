@@ -6,13 +6,13 @@ layout(location = 1) in vec3 vColor;
 
 layout(location = 2) in mat4x3 iModel;
 
-layout(binding = 0) uniform UniformBufferObject {
-    mat4 viewProj;
+layout(binding = 0) uniform UniformData {
+    mat4 uProjView;
 };
 
 layout(location = 0) out vec3 fragColor;
 
 void main() {
-    gl_Position = viewProj * vec4(iModel * vec4(vPos, 1.0), 1.0);
+    gl_Position = uProjView * vec4(iModel * vec4(vPos, 1.0), 1.0);
     fragColor = vColor;
 }

@@ -38,9 +38,6 @@ pub fn new_swapchain_and_images(
         image_count,
     );
 
-    let (graphics, present) = device::find_queue_families(physical_device, surface, surface_khr, instance);
-    let family_indices = [graphics.unwrap(), present.unwrap()];
-
     let info = {
         let mut builder = vk::SwapchainCreateInfoKHR::builder()
             .surface(surface_khr)
@@ -51,13 +48,24 @@ pub fn new_swapchain_and_images(
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT);
 
-        builder = match (graphics, present) {
-            (Some(graphics), Some(present)) if graphics != present => builder
-                .image_sharing_mode(vk::SharingMode::CONCURRENT)
-                .queue_family_indices(&family_indices),
-            (Some(_), Some(_)) => builder.image_sharing_mode(vk::SharingMode::EXCLUSIVE),
-            _ => panic!(),
-        };
+        let (
+            graphics, 
+            _,
+            present
+        ) = device::find_queue_family_indices(physical_device, &surface, surface_khr, &instance);
+
+        let graphics = graphics.unwrap();
+        let present = present.unwrap();
+
+        let indices = [graphics, present];
+        builder = 
+            if graphics != present { 
+                builder
+                    .image_sharing_mode(vk::SharingMode::CONCURRENT)
+                    .queue_family_indices(&indices)
+            } else {
+                builder.image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+            };
 
         builder
             .pre_transform(capabilities.current_transform)

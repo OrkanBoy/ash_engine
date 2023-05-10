@@ -2,7 +2,7 @@ use ash::vk;
 
 use crate::math;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct VertexData {
     pub pos: [f32; 3],
     pub color: [f32; 3],

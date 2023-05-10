@@ -8,7 +8,7 @@ pub struct Buffer<T: Copy> {
     device: Rc<ash::Device>,
     pub handle: vk::Buffer,
     pub memory: vk::DeviceMemory,
-    size: vk::DeviceSize,
+    pub size: vk::DeviceSize,
     size_of_t: vk::DeviceSize,
     phantom: PhantomData<T>,
 }
@@ -84,23 +84,13 @@ impl<T: Copy> Buffer<T> {
         start_index: usize,
         count: usize,
         transfer_queue: vk::Queue,
-        command_pool: vk::CommandPool,
+        transfer_fence: vk::Fence,
+        transfer_command_buffer: vk::CommandBuffer,
     ) {
-        let command_buffers = {
-            let info = vk::CommandBufferAllocateInfo::builder()
-                .command_buffer_count(1)
-                .command_pool(command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY);
-
-            unsafe {self.device.allocate_command_buffers(&info).unwrap()}
-        };
-        let command_buffer = command_buffers[0];
-
         //begin recording
         {
-            let begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            unsafe { self.device.begin_command_buffer(command_buffer, &begin_info).unwrap(); }
+            let begin_info = vk::CommandBufferBeginInfo::default();
+            unsafe { self.device.begin_command_buffer(transfer_command_buffer, &begin_info).unwrap(); }
         }
 
         //copy
@@ -112,27 +102,24 @@ impl<T: Copy> Buffer<T> {
                     size: self.size_of_t * count as vk::DeviceSize,
                 }
             ];
-            unsafe { self.device.cmd_copy_buffer(command_buffer, src.handle, self.handle, &regions); }
+            unsafe { self.device.cmd_copy_buffer(transfer_command_buffer, src.handle, self.handle, &regions); }
         }
 
 
         //end recording
-        unsafe {self.device.end_command_buffer(command_buffer).unwrap();}
+        unsafe {self.device.end_command_buffer(transfer_command_buffer).unwrap();}
 
         //submit
         {
             let submit_infos = [
                 vk::SubmitInfo::builder()
-                    .command_buffers(&command_buffers) 
+                    .command_buffers(&[transfer_command_buffer]) 
                     .build()
             ];
             unsafe {
-                self.device.queue_submit(transfer_queue, &submit_infos, vk::Fence::null()).unwrap();
-                self.device.queue_wait_idle(transfer_queue).unwrap();
+                self.device.queue_submit(transfer_queue, &submit_infos, transfer_fence).unwrap();
             }
         }
-
-        unsafe { self.device.free_command_buffers(command_pool, &command_buffers); }
     }
 
     pub fn stage_and_copy_from_slice<A>(
@@ -140,7 +127,8 @@ impl<T: Copy> Buffer<T> {
         data: &[T],
         start_index: usize,
         transfer_queue: vk::Queue,
-        command_pool: vk::CommandPool,
+        transfer_fence: vk::Fence,
+        transfer_command_buffer: vk::CommandBuffer,
         device_mem_props: &vk::PhysicalDeviceMemoryProperties,
     ) {
         let mut staging_buffer = Self::new(
@@ -158,7 +146,8 @@ impl<T: Copy> Buffer<T> {
             start_index,
             data.len(),
             transfer_queue,
-            command_pool,
+            transfer_fence,
+            transfer_command_buffer,
         );
 
         staging_buffer.destroy();
