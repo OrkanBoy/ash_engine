@@ -32,7 +32,7 @@ use winit::{
     dpi::{PhysicalSize, PhysicalPosition}, 
     event::{
         WindowEvent,
-        VirtualKeyCode, KeyboardInput, ElementState,
+        VirtualKeyCode, KeyboardInput, ElementState, DeviceEvent,
     }
 };
 
@@ -284,7 +284,7 @@ impl VkApp {
             near_z: 1.0,
             far_z: 100.0,
             translation_speed: 3.0,
-            rotation_speed: 0.05,
+            rotation_speed: 0.2,
         };
 
         let input_state = input::InputState::new();
@@ -965,6 +965,7 @@ impl VkApp {
             self.input_state.was_key_pressed(VirtualKeyCode::Escape) {
             self.in_game = !self.in_game;
             self.window.set_cursor_visible(!self.in_game);
+            //NOTE: CursorGrabMode::Locked Not implemented by winit
             self.window.set_cursor_grab(
                 if self.in_game {
                     CursorGrabMode::Confined
@@ -972,6 +973,15 @@ impl VkApp {
                     CursorGrabMode::None
                 }
             ).unwrap();
+
+            if !self.in_game {
+                self.window.set_cursor_position(
+                    PhysicalPosition {
+                        x: self.swapchain_extent.width / 2,
+                        y: self.swapchain_extent.height / 2,
+                    }
+                ).unwrap();
+            }
         }
 
         if !self.in_game {
@@ -1002,9 +1012,8 @@ impl VkApp {
             camera.x -= dc;
         }
 
-        let delta_mouse = self.input_state.calc_delta_mouse_as_f32();
-        camera.x_z_angle  += drotation * delta_mouse[0];
-        camera.xz_y_angle += drotation * delta_mouse[1];
+        camera.x_z_angle  += drotation * self.input_state.delta_mouse_pos[0];
+        camera.xz_y_angle += drotation * self.input_state.delta_mouse_pos[1];
 
     }
 }
@@ -1086,7 +1095,7 @@ fn main() {
                 app.update_game(dt);
 
                 app.input_state.previous_keys_pressed = app.input_state.keys_pressed;
-                app.input_state.previous_mouse_pos = app.input_state.mouse_pos;
+                app.input_state.delta_mouse_pos = [0.0, 0.0];
 
                 if dirty_swapchain {
                     if app.swapchain_extent.width > 0 && app.swapchain_extent.height > 0 {
@@ -1097,24 +1106,13 @@ fn main() {
                 }
                 dirty_swapchain = app.draw_frame();
             }
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CursorMoved { position, .. } => {
-                    app.input_state.mouse_pos = [position.x as u32, position.y as u32];
-                    if app.in_game && (
-                        app.input_state.mouse_pos[0] == app.swapchain_extent.width - 1 ||
-                        app.input_state.mouse_pos[0] == 0 ||
-                        app.input_state.mouse_pos[1] == app.swapchain_extent.height - 1 ||
-                        app.input_state.mouse_pos[1] == 0
-                    ) {
-                        let pos = PhysicalPosition {
-                            x:  app.swapchain_extent.width / 2,
-                            y: app.swapchain_extent.height / 2,
-                        };
-                        app.window.set_cursor_position(pos).unwrap();
-                        app.input_state.mouse_pos = [pos.x, pos.y];
-                        app.input_state.previous_mouse_pos = app.input_state.mouse_pos;
-                    }
+            Event::DeviceEvent { event, .. } => match event {
+                DeviceEvent::MouseMotion { delta, .. } => {
+                    app.input_state.delta_mouse_pos = [delta.0 as f32, delta.1 as f32];
                 }
+                _ => {}
+            }
+            Event::WindowEvent { event, .. } => match event {
                 WindowEvent::KeyboardInput { input, .. } => {
                     if let Some(v_keycode) = input.virtual_keycode {
                         app.input_state.set_key_pressed(v_keycode, input.state == ElementState::Pressed);
