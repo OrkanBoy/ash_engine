@@ -95,7 +95,6 @@ pub fn new_pipeline(
         .sample_shading_enable(false)
         .rasterization_samples(vk::SampleCountFlags::TYPE_1)
         .min_sample_shading(1.0)
-        // .sample_mask() // null
         .alpha_to_coverage_enable(false)
         .alpha_to_one_enable(false)
         .build();
@@ -123,8 +122,6 @@ pub fn new_pipeline(
     let layout = {
         let layout_info = vk::PipelineLayoutCreateInfo::builder()
             .set_layouts(&descriptor_set_layouts);
-            //.push_constant_ranges(&push_constant_ranges);
-
 
         unsafe {
             device

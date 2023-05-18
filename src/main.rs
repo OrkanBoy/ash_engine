@@ -7,6 +7,8 @@ pub mod swapchain;
 pub mod pipeline;
 pub mod descriptor;
 pub mod instance;
+pub mod entity;
+pub mod input;
 
 use buffer::Buffer;
 use data::VertexData;
@@ -26,11 +28,11 @@ use std::{
 use winit::{
     self, 
     event_loop::EventLoop, 
-    window::WindowBuilder, 
-    dpi::PhysicalSize, 
+    window::{WindowBuilder, CursorGrabMode}, 
+    dpi::{PhysicalSize, PhysicalPosition}, 
     event::{
         WindowEvent,
-        VirtualKeyCode,
+        VirtualKeyCode, KeyboardInput, ElementState,
     }
 };
 
@@ -60,11 +62,14 @@ const MAX_PARTICLES_INSTANCE_COUNT: usize = 40;
 
 struct VkApp {
     camera: Camera,
+    input_state: input::InputState,
+    in_game: bool,
 
     start_instant: time::Instant,
     entry: ash::Entry,
     instance: ash::Instance,
 
+    window: winit::window::Window,
     surface: Surface,
     surface_khr: vk::SurfaceKHR,
 
@@ -113,10 +118,10 @@ struct VkApp {
     index_count: usize,
     index_transfer_fence: vk::Fence,
 
-    per_frame_uniform_buffer: Buffer<descriptor::UniformData>,
+    uniform_buffer: Buffer<descriptor::UniformData>,
 
     particles: Vec<instance::Particle>,
-    particle_per_frame_instance_buffer: Buffer<data::InstanceData>,
+    particle_instance_buffer: Buffer<data::InstanceData>,
     particle_instance_count: usize,
     particle_instances: Vec<instance::Instance>,
     particle_instance_transfer_fences: Vec<vk::Fence>,
@@ -125,7 +130,7 @@ struct VkApp {
 }
 
 impl VkApp {
-    fn new(window: &winit::window::Window) -> Self {
+    fn new(window: winit::window::Window) -> Self {
         log::debug!("Creating app...");
 
         let entry = ash::Entry::linked();
@@ -244,14 +249,14 @@ impl VkApp {
             device.clone(),
             &physical_device_mem_props,
         );
-        let per_frame_uniform_buffer = Buffer::new(
+        let uniform_buffer = Buffer::new(
             MAX_FRAMES_IN_FLIGHT,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             device.clone(),
             &physical_device_mem_props,
         );
-        let particle_per_frame_instance_buffer = Buffer::new(
+        let particle_instance_buffer = Buffer::new(
             MAX_PARTICLES_INSTANCE_COUNT * MAX_FRAMES_IN_FLIGHT,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
@@ -260,7 +265,7 @@ impl VkApp {
         );
 
         let descriptor_pool = descriptor::new_descriptor_pool(&device, 1);
-        let descriptor_set = descriptor::new_descriptor_set(&device, descriptor_pool, descriptor_set_layout, &per_frame_uniform_buffer);
+        let descriptor_set = descriptor::new_descriptor_set(&device, descriptor_pool, descriptor_set_layout, &uniform_buffer);
 
         let (
             image_available_semaphores, 
@@ -278,17 +283,22 @@ impl VkApp {
             xz_y_angle: 0.0,
             near_z: 1.0,
             far_z: 100.0,
-            translation_speed: 10.0,
-            rotation_speed: 3.0,
+            translation_speed: 3.0,
+            rotation_speed: 0.05,
         };
-        
+
+        let input_state = input::InputState::new();
+
         Self {
             camera,
+            input_state,
+            in_game: false,
 
             start_instant: time::Instant::now(),
             entry,
             instance,
 
+            window: window,
             surface,
             surface_khr,
 
@@ -337,9 +347,9 @@ impl VkApp {
             index_count: 0,
             index_transfer_fence,
 
-            per_frame_uniform_buffer,
+            uniform_buffer,
 
-            particle_per_frame_instance_buffer, 
+            particle_instance_buffer, 
             particle_instance_count: 0,
             particle_instance_transfer_fences,
             particles: vec![],
@@ -574,7 +584,7 @@ impl VkApp {
             ),
         };
 
-        self.per_frame_uniform_buffer.copy_from_slice::<f32>(&[uniform_data], self.current_frame);
+        self.uniform_buffer.copy_from_slice::<f32>(&[uniform_data], self.current_frame);
     }
 
     fn load_particle(
@@ -685,7 +695,7 @@ impl VkApp {
             }
         }
 
-        self.particle_per_frame_instance_buffer.stage_and_copy_from_slice::<f32>(
+        self.particle_instance_buffer.stage_and_copy_from_slice::<f32>(
             &particle_instances_data, 
             MAX_PARTICLES_INSTANCE_COUNT * self.current_frame,
             self.transfer_queue,
@@ -776,7 +786,7 @@ impl VkApp {
             self.device.cmd_bind_vertex_buffers(
                 graphics_command_buffer, 
                 data::INSTANCE_BINDING, 
-                &[self.particle_per_frame_instance_buffer.handle], 
+                &[self.particle_instance_buffer.handle], 
                 &[0]
             );
             self.device.cmd_bind_index_buffer(
@@ -883,7 +893,6 @@ impl VkApp {
             let render_infos = [render_info];
 
             unsafe { self.device.queue_submit(self.graphics_queue, &render_infos, in_flight_fence).unwrap(); }
-
         }
 
         //present
@@ -934,7 +943,7 @@ impl VkApp {
     }
 
     pub fn update_game(&mut self, dt: f32) {
-        let coupling = 10.0;
+        let coupling = 0.0;
 
         let d = 
             self.particle_instances[0].translation - 
@@ -950,6 +959,54 @@ impl VkApp {
         self.particle_instances[0].update_translation_kinematics(-force, dt);
         self.particle_instances[1].update_translation_kinematics(force, dt);
     }
+
+    pub fn handle_input(&mut self, dt: f32) {
+        if !self.input_state.is_key_pressed(VirtualKeyCode::Escape) &&
+            self.input_state.was_key_pressed(VirtualKeyCode::Escape) {
+            self.in_game = !self.in_game;
+            self.window.set_cursor_visible(!self.in_game);
+            self.window.set_cursor_grab(
+                if self.in_game {
+                    CursorGrabMode::Confined
+                } else {
+                    CursorGrabMode::None
+                }
+            ).unwrap();
+        }
+
+        if !self.in_game {
+            return;
+        }
+
+        let camera = &mut self.camera;
+
+        let dtranslation = camera.translation_speed * dt;
+        let drotation = camera.rotation_speed * dt;
+
+        let dc = dtranslation * camera.x_z_angle.cos();
+        let ds = dtranslation * camera.x_z_angle.sin();
+        if self.input_state.is_key_pressed(VirtualKeyCode::W) {
+            camera.z += dc;
+            camera.x += ds;
+        } 
+        if self.input_state.is_key_pressed(VirtualKeyCode::S) {
+            camera.z -= dc;
+            camera.x -= ds;
+        }
+        if self.input_state.is_key_pressed(VirtualKeyCode::D) {
+            camera.z -= ds;
+            camera.x += dc;
+        } 
+        if self.input_state.is_key_pressed(VirtualKeyCode::A) {
+            camera.z += ds;
+            camera.x -= dc;
+        }
+
+        let delta_mouse = self.input_state.calc_delta_mouse_as_f32();
+        camera.x_z_angle  += drotation * delta_mouse[0];
+        camera.xz_y_angle += drotation * delta_mouse[1];
+
+    }
 }
 
 impl Drop for VkApp {
@@ -960,8 +1017,8 @@ impl Drop for VkApp {
 
         self.vertex_buffer.destroy();
         self.index_buffer.destroy();
-        self.per_frame_uniform_buffer.destroy();
-        self.particle_per_frame_instance_buffer.destroy();
+        self.uniform_buffer.destroy();
+        self.particle_instance_buffer.destroy();
 
         unsafe {
             self.device.destroy_descriptor_pool(self.descriptor_pool, None);
@@ -997,7 +1054,6 @@ impl Drop for VkApp {
     }
 }
 
-
 fn main() {
     //app init
     env_logger::init();
@@ -1008,8 +1064,7 @@ fn main() {
         .with_inner_size(PhysicalSize {width: WIDTH, height: HEIGHT})
         .build(&event_loop)
         .unwrap();
-    let mut app = VkApp::new(&window);
-
+    let mut app = VkApp::new(window);
     app.init_game();
 
     //running app
@@ -1022,11 +1077,16 @@ fn main() {
     event_loop.run(move |system_event, _, control_flow| {
         match system_event {
             Event::MainEventsCleared => {
+                //timing
                 start_frame_time = end_frame_time;
                 end_frame_time = app.start_instant.elapsed().as_secs_f32();
                 dt = end_frame_time - start_frame_time;
-
+                
+                app.handle_input(dt);
                 app.update_game(dt);
+
+                app.input_state.previous_keys_pressed = app.input_state.keys_pressed;
+                app.input_state.previous_mouse_pos = app.input_state.mouse_pos;
 
                 if dirty_swapchain {
                     if app.swapchain_extent.width > 0 && app.swapchain_extent.height > 0 {
@@ -1038,42 +1098,26 @@ fn main() {
                 dirty_swapchain = app.draw_frame();
             }
             Event::WindowEvent { event, .. } => match event {
-                WindowEvent::KeyboardInput { input, .. } => {
-                    if input.virtual_keycode.is_none() {
-                        return;
+                WindowEvent::CursorMoved { position, .. } => {
+                    app.input_state.mouse_pos = [position.x as u32, position.y as u32];
+                    if app.in_game && (
+                        app.input_state.mouse_pos[0] == app.swapchain_extent.width - 1 ||
+                        app.input_state.mouse_pos[0] == 0 ||
+                        app.input_state.mouse_pos[1] == app.swapchain_extent.height - 1 ||
+                        app.input_state.mouse_pos[1] == 0
+                    ) {
+                        let pos = PhysicalPosition {
+                            x:  app.swapchain_extent.width / 2,
+                            y: app.swapchain_extent.height / 2,
+                        };
+                        app.window.set_cursor_position(pos).unwrap();
+                        app.input_state.mouse_pos = [pos.x, pos.y];
+                        app.input_state.previous_mouse_pos = app.input_state.mouse_pos;
                     }
-                    let dtranslation = app.camera.translation_speed * dt;
-                    let drotation = app.camera.rotation_speed * dt;
-                    match input.virtual_keycode.unwrap() {
-                        VirtualKeyCode::W => {
-                            app.camera.z += dtranslation * app.camera.x_z_angle.cos();
-                            app.camera.x += dtranslation * app.camera.x_z_angle.sin();
-                        } 
-                        VirtualKeyCode::S => {
-                            app.camera.z -= dtranslation * app.camera.x_z_angle.cos();
-                            app.camera.x -= dtranslation * app.camera.x_z_angle.sin();
-                        }
-                        VirtualKeyCode::D => {
-                            app.camera.z -= dtranslation * app.camera.x_z_angle.sin();
-                            app.camera.x += dtranslation * app.camera.x_z_angle.cos();
-                        } 
-                        VirtualKeyCode::A => {
-                            app.camera.z += dtranslation * app.camera.x_z_angle.sin();
-                            app.camera.x -= dtranslation * app.camera.x_z_angle.cos();
-                        }
-                        VirtualKeyCode::Up => {
-                            app.camera.xz_y_angle -= drotation;
-                        } 
-                        VirtualKeyCode::Down => {
-                            app.camera.xz_y_angle += drotation;
-                        }
-                        VirtualKeyCode::Right => {
-                            app.camera.x_z_angle += drotation;
-                        } 
-                        VirtualKeyCode::Left => {
-                            app.camera.x_z_angle -= drotation;
-                        }
-                        _ => {}
+                }
+                WindowEvent::KeyboardInput { input, .. } => {
+                    if let Some(v_keycode) = input.virtual_keycode {
+                        app.input_state.set_key_pressed(v_keycode, input.state == ElementState::Pressed);
                     }
                 }
                 WindowEvent::Resized(PhysicalSize {width, height}) => {

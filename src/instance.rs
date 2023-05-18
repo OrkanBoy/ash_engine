@@ -1,5 +1,4 @@
-use ash::vk;
-use crate::math::{self, Rotor};
+use crate::math;
 
 
 #[derive(Clone, Copy)]
@@ -50,6 +49,7 @@ pub struct Particle {
 }
 
 impl Instance {
+    #[inline]
     pub fn calc_model_mat(&self) -> math::ModelMat {
         math::ModelMat::from(self.scale, self.rotation, self.translation)
     }
