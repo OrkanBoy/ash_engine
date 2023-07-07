@@ -1,0 +1,25 @@
+Needing a massive rewrite, maybe from scratch
+currently I am not taking advanatge of Vulkan's parallelism 
+and spamming queue submits and fence waits
+
+I should probably look at the Vulkan API examples
+or the performance best practices in the Vulkan samples
+or maybe even how kohi engine does things
+
+Material System:
+    A met
+
+Entity Component System
+Physics System with compute and separate transform type
+Particles should only exist on GPU and use compute shaders
+Resources:
+    Materials(textures, shaders, uniforms)
+    Geometries
+
+Minimal abstraction,
+try minimise abstractions for buffers, images,
+Use a functional approach to accept required parameters
+
+Have abstractions only for high HIGH level things such as resources.
+High level abstractions should only live in the brain if possible
+enforcing them, enforces synchronization thus missing out from Vulkan's parallelism

@@ -1,6 +1,9 @@
-use std::ffi::{CStr, c_void, CString};
+use std::ffi::{c_void, CStr, CString};
 
-use ash::{vk::{DebugUtilsMessengerEXT, self}, extensions::ext::DebugUtils};
+use ash::{
+    extensions::ext::DebugUtils,
+    vk::{self, DebugUtilsMessengerEXT},
+};
 
 const LAYER_NAMES: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
 
@@ -11,11 +14,15 @@ unsafe extern "system" fn vulkan_debug_callback(
     _: *mut c_void,
 ) -> vk::Bool32 {
     type Flag = vk::DebugUtilsMessageSeverityFlagsEXT;
-    
-    let msg = format!("(Validation Layer): {:?} - {:?}", typ, CStr::from_ptr((*p_callback_data).p_message));
+
+    let msg = format!(
+        "(Validation Layer): {:?} - {:?}",
+        typ,
+        CStr::from_ptr((*p_callback_data).p_message)
+    );
     match flag {
-        Flag::VERBOSE => log::debug!("{msg}"), 
-        Flag::INFO => log::info!("{msg}"), 
+        Flag::VERBOSE => log::debug!("{msg}"),
+        Flag::INFO => log::info!("{msg}"),
         Flag::WARNING => log::warn!("{msg}"),
         _ => log::error!("{msg}"),
     }
@@ -23,7 +30,6 @@ unsafe extern "system" fn vulkan_debug_callback(
 }
 
 pub fn check_validation_layer_support(entry: &ash::Entry) {
-
     for required in LAYER_NAMES.iter() {
         let found = entry
             .enumerate_instance_layer_properties()
@@ -42,26 +48,28 @@ pub fn check_validation_layer_support(entry: &ash::Entry) {
 }
 
 pub fn new_messenger(debug_entry: &DebugUtils) -> DebugUtilsMessengerEXT {
-
     let create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
         .message_severity(
-            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR |
-            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING |
-            vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
-            vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE)
+            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+                | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE,
+        )
         .message_type(
-            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL | 
-            vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION | 
-            vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE)
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
         .pfn_user_callback(Some(vulkan_debug_callback));
 
-    unsafe { debug_entry
-        .create_debug_utils_messenger(&create_info, None)
-        .unwrap()
+    unsafe {
+        debug_entry
+            .create_debug_utils_messenger(&create_info, None)
+            .unwrap()
     }
 }
 
-    //Return CString to avoid dangling ptrs
+//Return CString to avoid dangling ptrs
 pub fn get_layer_names_and_ptrs() -> (Vec<CString>, Vec<*const i8>) {
     let layer_names = LAYER_NAMES
         .iter()
