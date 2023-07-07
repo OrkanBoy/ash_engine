@@ -1,5 +1,3 @@
-#![feature(generic_const_exprs)]
-
 pub mod renderer;
 pub mod math;
 pub mod input;
@@ -7,6 +5,7 @@ pub mod components;
 pub mod memory;
 pub mod data_structures;
 pub mod camera;
+pub mod geometry;
 
 use winit::dpi::PhysicalPosition;
 use winit::event::{DeviceEvent, WindowEvent, ElementState};
@@ -14,7 +13,6 @@ use winit::window::CursorGrabMode;
 use winit::{event::VirtualKeyCode, event_loop::EventLoop, window::WindowBuilder, dpi::PhysicalSize};
 use ash::vk::Extent2D;
 
-use crate::data_structures::darray::Darray;
 use crate::renderer::{VkApp, START_WINDOW_HEIGHT, START_WINDOW_WIDTH};
 
 fn init_game(app: &mut VkApp) {

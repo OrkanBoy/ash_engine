@@ -98,18 +98,18 @@ pub const INSTANCE_BINDING: u32 = 1;
 pub fn get_binding_descs(
     vertex_attributes: &[Attribute],
     instance_attributes: &[Attribute],
-) -> [vk::VertexInputBindingDescription; 2] {
+) -> [vk::VertexInputBindingDescription; 1] {
     [
         vk::VertexInputBindingDescription::builder()
             .binding(VERTEX_BINDING)
             .stride(calc_total_stride(vertex_attributes))
             .input_rate(vk::VertexInputRate::VERTEX)
             .build(),
-        vk::VertexInputBindingDescription::builder()
-            .binding(INSTANCE_BINDING)
-            .stride(calc_total_stride(instance_attributes))
-            .input_rate(vk::VertexInputRate::INSTANCE)
-            .build(),
+        // vk::VertexInputBindingDescription::builder()
+        //     .binding(INSTANCE_BINDING)
+        //     .stride(calc_total_stride(instance_attributes))
+        //     .input_rate(vk::VertexInputRate::INSTANCE)
+        //     .build(),
     ]
 }
 
@@ -127,12 +127,12 @@ pub fn get_attrib_descs(
         0, 
         vertex_attributes,
     );
-    push_attrib_descs(
-        &mut attrib_descs, 
-        INSTANCE_BINDING, 
-        instance_location_offset,
-        instance_attributes
-    );
+    // push_attrib_descs(
+    //     &mut attrib_descs, 
+    //     INSTANCE_BINDING, 
+    //     instance_location_offset,
+    //     instance_attributes
+    // );
     attrib_descs
 }
 
@@ -210,9 +210,11 @@ pub fn new_pipeline_and_layout(
         .name(&entry_name)
         .build();
 
+    let binding_descs = get_binding_descs(vertex_attributes, instance_attributes);
+    let attrib_descs = get_attrib_descs(vertex_attributes, instance_attributes);
     let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
-        .vertex_binding_descriptions(&get_binding_descs(vertex_attributes, instance_attributes))
-        .vertex_attribute_descriptions(&get_attrib_descs(vertex_attributes, instance_attributes))
+        .vertex_binding_descriptions(&binding_descs)
+        .vertex_attribute_descriptions(&attrib_descs)
         .build();
 
     let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
@@ -279,7 +281,7 @@ pub fn new_pipeline_and_layout(
         let layout_info = vk::PipelineLayoutCreateInfo::builder()
             .set_layouts(&[
                 ubo_set_layout,
-                textures_set_layout,
+                // textures_set_layout,
             ])
             .build();
 

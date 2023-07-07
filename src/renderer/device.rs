@@ -193,14 +193,14 @@ pub fn get_device_extension_names_and_ptrs() -> (Vec<&'static CStr>, Vec<*const 
 
 pub fn find_mem_type_index(
     supported_types_mask: u32,
-    required_props: vk::MemoryPropertyFlags,
+    required_property_flags: vk::MemoryPropertyFlags,
     physical_device_memory_properties: &vk::PhysicalDeviceMemoryProperties,
 ) -> u32 {
     for i in 0..physical_device_memory_properties.memory_type_count {
         if supported_types_mask & (1 << i) != 0
             && physical_device_memory_properties.memory_types[i as usize]
                 .property_flags
-                .contains(required_props)
+                .contains(required_property_flags)
         {
             return i;
         }

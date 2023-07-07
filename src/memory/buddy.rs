@@ -1,80 +1,87 @@
 use super::*;
 use crate::data_structures::bits;
 use core::ptr::null_mut;
+use core::mem::{size_of, align_of};
 
-const BLOCK_LEVELS: usize = 8;
-const BLOCK_COUNT: usize = 1 << (BLOCK_LEVELS - 1);
-const BLOCK_SIZE: usize = HEAP_SIZE >> (BLOCK_LEVELS - 1);
-
-const FREE_TREE_SIZE: usize = align_up(BLOCK_COUNT * 2 - 1, 64) / 64;
-
-//TODO: using usize as *mut is dangerous, try do something more safe
+//TODO: using *mut FreeListNode is dangerous, try do something more safe
 struct FreeListNode {
     next:           *mut FreeListNode,
     previous:       *mut FreeListNode,
     free_tree_index:usize,
 }
 
-//TODO: rename variables
-pub struct Allocator {
+// TODO: ideally do not use Vec, rather another allocator
+pub struct BuddyAllocator {
     /// OS allocates the heap
-    heap_start: *mut u8,
-    /// tracks list of all free blocks for fast allocation
-    free_list_heads: [*mut FreeListNode; BLOCK_LEVELS],
+    pub heap_start: *mut u8,
+    pub heap_size: usize,
+    /// smallest size of a single block
+    block_size: usize,
+    /// tracks free blocks for all sizes for fast allocation
+    free_list_heads: Vec<*mut FreeListNode>,
     /// Heap is broken into a binary tree like structure.
     /// Use this to check if a tree section is free.
-    free_tree:   [u64; FREE_TREE_SIZE],
+    free_tree:   Vec<usize>,
     /// Allows to see which parts of allocated memory map to the free tree
     /// ```
     /// let block: usize;
     /// let block_index = (block - HEAP_START) / BLOCK_SIZE;
     /// let free_tree_index = block_to_free_tree[block_index];
     /// ```
-    block_to_free_tree: [Option<usize>; BLOCK_COUNT],
+    block_to_free_tree: Vec<Option<usize>>,
 }
 
-impl Allocator {
-    pub unsafe fn new() -> Self {
-        let heap_start = alloc::alloc::alloc(HEAP_LAYOUT);
-        let mut free_list_heads = [core::ptr::null_mut::<FreeListNode>(); BLOCK_LEVELS];
+impl BuddyAllocator {
+    /// uses provided ptr to manage the heap
+    pub unsafe fn new(heap_start: *mut u8, heap_size: usize, block_levels: usize) -> Self {
+        let block_count = 1 << (block_levels - 1);
+        let block_size = heap_size >> (block_levels - 1);
+        assert!(block_size >= size_of::<FreeListNode>());
+
+        let mut free_list_heads = vec![null_mut(); block_levels];
         free_list_heads[0] = heap_start as *mut FreeListNode;
-        *(free_list_heads[0]) = FreeListNode {
-            next: null_mut(),
-            previous: null_mut(),
-            free_tree_index: 0,
-        };
 
         Self {
             heap_start,
+            heap_size,
             free_list_heads,
-            free_tree: [0b0; FREE_TREE_SIZE],
-            block_to_free_tree: [None; BLOCK_COUNT],
+            block_size,
+            free_tree: vec![!0; align_up(2 * block_count - 1, 8 * size_of::<usize>()) / 8],
+            block_to_free_tree: vec![None; block_count],
         }
     }
 
-    /// `align`: must be a power of 2
-    pub unsafe fn alloc(&mut self, size: usize, align: usize) -> *mut u8 {
-        let size_requested = align_up(size, align);
+    pub fn get_block_count(&self) -> usize {
+        self.block_to_free_tree.len()
+    }
 
+    pub fn get_block_levels(&self) -> usize {
+        self.free_list_heads.len()
+    }
+}
+
+impl Allocator for BuddyAllocator {
+    unsafe fn alloc(&mut self, requested_size: usize, _requested_align: usize) -> (*mut u8, usize) {
         let mut level = 0;
-        while (HEAP_SIZE >> (level + 1)) >= size_requested && level + 1 < BLOCK_LEVELS {
+        while (self.heap_size >> (level + 1)) >= requested_size && level + 1 < self.get_block_levels() {
             level += 1;
         }
         let best_level = level;
 
-        while level != 0 && self.free_list_heads[level].is_null() {
+        while self.free_list_heads[level].is_null() && level != 0 {
             level -= 1;
         }
 
         if self.free_list_heads[level].is_null() {
-            return null_mut();
+            log::warn!("Failed to allocate");
+            return (null_mut(), 0);
         }
+        assert!((*self.free_list_heads[level]).previous == null_mut());
 
         let allocated_node = self.free_list_heads[level];
-        let key_ptr_to_bitmask = (allocated_node as usize - self.heap_start as usize) / BLOCK_SIZE;
-        if self.block_to_free_tree[key_ptr_to_bitmask].is_some() {
-            return null_mut();
-        }
+        let block_index = (allocated_node as usize - self.heap_start as usize) / self.block_size;
+
+        assert!(self.block_to_free_tree[block_index].is_none());
 
         let mut left_free_tree_index = (*allocated_node).free_tree_index;
         bits::set_bit_false(&mut self.free_tree, left_free_tree_index);
@@ -86,7 +93,7 @@ impl Allocator {
         while best_level != level {
             level += 1;
             left_free_tree_index = (left_free_tree_index << 1) + 1;
-            let to_free_node = (allocated_node as usize + (HEAP_SIZE >> level)) as *mut FreeListNode;
+            let to_free_node = (allocated_node as usize + (self.heap_size >> level)) as *mut FreeListNode;
             *to_free_node = FreeListNode {
                 next: self.free_list_heads[level],
                 previous: null_mut(),
@@ -98,19 +105,19 @@ impl Allocator {
             self.free_list_heads[level] = to_free_node;
             bits::set_bit_false(&mut self.free_tree, left_free_tree_index);
         }
-        self.block_to_free_tree[key_ptr_to_bitmask] = Some(left_free_tree_index);
+        self.block_to_free_tree[block_index] = Some(left_free_tree_index);
 
-        allocated_node as *mut u8
+        (allocated_node as *mut u8, self.heap_size >> level)
     }
 
-    pub unsafe fn dealloc(&mut self, ptr: *mut u8) {
-        let block_index = (ptr as usize - self.heap_start as usize) / BLOCK_SIZE;
+    unsafe fn dealloc(&mut self, allocated_ptr: *mut u8) {
+        let block_index = (allocated_ptr as usize - self.heap_start as usize) / self.block_size;
         let mut free_tree_index = self.block_to_free_tree[block_index].unwrap();
 
         self.block_to_free_tree[block_index] = None;
         bits::set_bit_true(&mut self.free_tree, free_tree_index);
 
-        let mut node = ptr as *mut FreeListNode;
+        let mut node = allocated_ptr as *mut FreeListNode;
         let mut level = get_block_level(free_tree_index);
 
         while level != 0 {
@@ -120,9 +127,11 @@ impl Allocator {
             if bits::get_bit(&self.free_tree, buddy_free_tree_index) {
                 free_tree_index = (free_tree_index - 1) >> 1;
                 bits::set_bit_true(&mut self.free_tree, free_tree_index);
-                let block_size = HEAP_SIZE >> level;
+                let block_size = self.heap_size >> level;
+                // get parent node
                 node = align_down(node as usize, block_size << 1) as *mut FreeListNode;
 
+                // calculating buddy node based off of parent node
                 let buddy_node = (node as usize + is_left_as_usize * block_size) as *mut FreeListNode;
 
                 if !(*buddy_node).next.is_null() {
@@ -151,14 +160,6 @@ impl Allocator {
     }
 }
 
-impl Drop for Allocator {
-    fn drop(&mut self) {
-        unsafe {
-            alloc::alloc::dealloc(self.heap_start, HEAP_LAYOUT);
-        }
-    }
-}
-
 fn get_block_level(free_tree_index: usize) -> usize {
     let free_tree_index = (free_tree_index + 1) >> 1;
     let mut level = 0;
@@ -166,4 +167,110 @@ fn get_block_level(free_tree_index: usize) -> usize {
         level += 1;
     }
     level
+}
+
+#[test]
+fn test_get_block_level() {
+    let block_levels = 8;
+    let block_count = 1 << (block_levels - 1);
+
+    let index_to_level = {
+        let mut index_to_level = Vec::with_capacity(2 * block_count - 1);
+
+        let mut index = 0_usize;
+        for level in 0..block_levels {
+            for _ in 0..1 << level {
+                index_to_level.push((index, level));
+                index += 1;
+            }
+        }
+        index_to_level
+    };
+
+    for (index, level) in index_to_level {
+        assert!(get_block_level(index) == level);
+    }
+}
+
+// TODO: write a better test
+#[test]
+fn test_coalescing() {
+    let heap_size = 0x4000;
+    let heap_layout = unsafe { core::alloc::Layout::from_size_align_unchecked(heap_size, heap_size) };
+    let heap_start = unsafe { alloc::alloc::alloc(heap_layout) };
+
+    let mut allocator = unsafe {
+        BuddyAllocator::new(heap_start, heap_size, 4)
+    };
+
+    {
+        let (small0, _) = unsafe {
+            allocator.alloc(allocator.block_size, 1)
+        };
+        let (small1, _) = unsafe {
+            allocator.alloc(allocator.block_size, 1)
+        };
+        let (small2, _) = unsafe {
+            allocator.alloc(allocator.block_size, 1)
+        };
+    
+        unsafe {
+            allocator.dealloc(small0);
+            allocator.dealloc(small1);
+        }
+    
+        let (medium0, _) = unsafe {
+            allocator.alloc(allocator.block_size >> 2, 1)
+        };
+    
+        assert!(small0 != medium0);
+    }
+    
+    unsafe {
+        alloc::alloc::dealloc(allocator.heap_start, heap_layout);
+    }
+}
+
+#[test]
+fn test_failed_allocation() {
+    let heap_size = 0x4000;
+    let heap_layout = unsafe { core::alloc::Layout::from_size_align_unchecked(heap_size, heap_size) };
+    let heap_start = unsafe { alloc::alloc::alloc(heap_layout) };
+
+    let mut allocator = unsafe {
+        BuddyAllocator::new(heap_start, heap_size, 4)
+    };
+
+    {
+        let (big0, _) = unsafe {
+            allocator.alloc(heap_size, 1)
+        };
+        let (big1, _) = unsafe {
+            allocator.alloc(heap_size, 1)
+        };
+
+        assert!(big1 == null_mut());
+
+        unsafe {
+            allocator.dealloc(big0);
+        }
+    }
+
+    {
+        for _ in 0..8 {
+            let (_, s) = unsafe { 
+                allocator.alloc(heap_size / 8, 1)
+            };
+            println!("{s}");
+            assert!(s == heap_size / 8);
+        }
+        let (_, s) = unsafe { 
+            allocator.alloc(heap_size / 8, 1)
+        };
+        assert!(s == 0);
+    }
+    
+    unsafe {
+        alloc::alloc::dealloc(allocator.heap_start, heap_layout);
+    }
 }

@@ -1,4 +1,4 @@
-use std::mem::size_of;
+use std::{mem::size_of, rc::Rc};
 
 use ash::vk;
 
@@ -6,6 +6,76 @@ use ash::vk;
 #[derive(Clone, Copy, Default)]
 pub struct PerFrameUBO {
     pub proj_view: crate::math::Mat,
+}
+
+pub struct PerFrameUniformBuffer {
+    device: Rc<ash::Device>,
+    pub handle: vk::Buffer,
+    memory: vk::DeviceMemory,
+    pub mapped_ptr: *mut u8,
+}
+
+impl PerFrameUniformBuffer {
+    const SIZE: vk::DeviceSize = (crate::renderer::MAX_FRAMES_IN_FLIGHT * size_of::<PerFrameUBO>()) as vk::DeviceSize;
+
+    pub fn new(
+        device: Rc<ash::Device>,
+        physical_device_memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    ) -> Self {
+        let handle = {
+            let info = vk::BufferCreateInfo::builder()
+                .size(Self::SIZE)
+                .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE); // configurable
+            unsafe { device.create_buffer(&info, None) }.expect("Failed to create buffer handle")
+        };
+
+        let mem_requirements = unsafe { device.get_buffer_memory_requirements(handle) };
+
+        let memory = {
+            let mem_type_index = super::device::find_mem_type_index(
+                mem_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                &physical_device_memory_properties,
+            );
+            let alloc_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(mem_type_index);
+
+            unsafe { device.allocate_memory(&alloc_info, None) }
+                .expect("Failed to allocate device memory")
+        };
+
+        unsafe {
+            device
+                .bind_buffer_memory(handle, memory, 0)
+                .expect("Failed to associate memory with buffer");
+        }
+
+        let mapped_ptr = unsafe { device
+            .map_memory(
+                memory,
+                0,
+                Self::SIZE,
+                vk::MemoryMapFlags::empty(),
+            )
+            .unwrap() as *mut u8
+        };
+
+        Self {
+            device,
+            handle,
+            memory,
+            mapped_ptr,
+        }
+    }
+
+    pub unsafe fn destroy(&mut self) {
+        self.device.unmap_memory(self.memory);
+
+        self.device.destroy_buffer(self.handle, None);
+        self.device.free_memory(self.memory, None);
+    }
 }
 
 // Textures, need multiple descriptors for each texture samplers
@@ -90,7 +160,7 @@ pub fn new_per_frame_ubo_set(
     device: &ash::Device,
     pool: vk::DescriptorPool,
     ubo_set_layout: vk::DescriptorSetLayout,
-    per_frame_uniform_buffer: &super::buffer::Buffer,
+    per_frame_uniform_buffer: &PerFrameUniformBuffer,
 ) -> vk::DescriptorSet {
     let set = unsafe {
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
@@ -105,7 +175,7 @@ pub fn new_per_frame_ubo_set(
         let buffer_info = vk::DescriptorBufferInfo::builder()
             .buffer(per_frame_uniform_buffer.handle)
             .offset(0)
-            .range(per_frame_uniform_buffer.size)
+            .range(size_of::<PerFrameUBO>() as vk::DeviceSize)
             .build();
 
         vk::WriteDescriptorSet::builder()

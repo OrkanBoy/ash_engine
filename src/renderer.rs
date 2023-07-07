@@ -1,15 +1,13 @@
 pub mod debug;
-pub mod buffer;
 pub mod device;
 pub mod swapchain;
 pub mod pipeline;
 pub mod descriptor;
-pub mod texture;
+// pub mod texture;
 pub mod image;
 pub mod render_pass;
 
-use buffer::Buffer;
-use crate::camera::Camera;
+use crate::{camera::Camera, geometry};
 
 use raw_window_handle::{
     HasRawDisplayHandle, 
@@ -41,7 +39,7 @@ use self::descriptor::PerFrameUBO;
 pub const START_WINDOW_WIDTH: u32 = 1280;
 pub const START_WINDOW_HEIGHT: u32 = 720;
 
-pub const MAX_FRAMES_IN_FLIGHT: usize = 1;
+pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 pub struct VkApp {
     pub camera: Camera,
@@ -98,8 +96,7 @@ pub struct VkApp {
     // proper texture system
     // and resource acquisition
     textures_set_layout: vk::DescriptorSetLayout,
-    textures_sets: Vec<vk::DescriptorSet>,
-    textures: Vec<texture::Texture>,
+    // textures: Vec<texture::Texture>,
 
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -110,10 +107,9 @@ pub struct VkApp {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
 
-    vertex_buffer: Buffer, // allocator
-    index_buffer: Buffer, // allocator
+    pub geometry_system: geometry::GeometrySystem,
 
-    per_frame_uniform_buffer: Buffer,
+    per_frame_uniform_buffer: descriptor::PerFrameUniformBuffer,
 
     current_frame: usize,
 }
@@ -223,11 +219,8 @@ impl VkApp {
             "shaders/foo.frag",
             &[
                 Attribute::F32x3,
-                Attribute::F32x3,
-                Attribute::F32x2,
             ],
             &[
-                Attribute::F32x4x3,
             ],
         );
 
@@ -235,24 +228,14 @@ impl VkApp {
             instance.get_physical_device_memory_properties(physical_device) 
         };
 
-        let vertex_buffer = Buffer::new(
-            4 * 100,
-            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        let geometry_system = geometry::GeometrySystem::new(
             device.clone(),
             &physical_device_memory_properties,
+            0x1000,
+            0x1000
         );
-        let index_buffer = Buffer::new(
-            2 * 200,
-            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            device.clone(),
-            &physical_device_memory_properties,
-        );
-        let per_frame_uniform_buffer = Buffer::new(
-            2 * 200,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE,
+
+        let per_frame_uniform_buffer = descriptor::PerFrameUniformBuffer::new(
             device.clone(),
             &physical_device_memory_properties,
         );
@@ -369,8 +352,6 @@ impl VkApp {
             per_frame_uniform_buffer,
 
             textures_set_layout,
-            textures: vec![],
-            textures_sets: vec![],
 
             pipeline_layout,
             pipeline,
@@ -381,9 +362,7 @@ impl VkApp {
             render_finished_semaphores,
             in_flight_fences,
 
-            vertex_buffer,
-            index_buffer,
-
+            geometry_system,
             current_frame: 0,
         }
     }
@@ -603,10 +582,11 @@ impl VkApp {
             proj_view: self.camera.calc_proj_view()
         };
 
-        self.per_frame_uniform_buffer.copy_from_slice(
-            &[ubo], 
-            (self.current_frame * size_of::<PerFrameUBO>()) as vk::DeviceSize
-        );
+        let per_frame_ubo_ptr = (self.per_frame_uniform_buffer.mapped_ptr as usize + 
+            self.current_frame * size_of::<PerFrameUBO>()) as *mut PerFrameUBO;
+        unsafe {
+            *per_frame_ubo_ptr = ubo;
+        }
     }
 
     fn record_graphics_command_buffer(
@@ -687,6 +667,17 @@ impl VkApp {
                 vk::PipelineBindPoint::GRAPHICS, 
                 self.pipeline
             );
+
+            self.device.cmd_bind_descriptor_sets(
+                graphics_command_buffer, 
+                vk::PipelineBindPoint::GRAPHICS, 
+                self.pipeline_layout, 
+                0, 
+                &[self.per_frame_ubo_set],
+                &[(self.current_frame * size_of::<PerFrameUBO>()) as u32] 
+            );
+
+            self.geometry_system.cmd_bind_resources(graphics_command_buffer);
 
             self.device.cmd_end_render_pass(graphics_command_buffer);
 
@@ -782,15 +773,14 @@ impl Drop for VkApp {
         self.cleanup_swapchain();
 
         unsafe {
-            self.vertex_buffer.destroy();
-            self.index_buffer.destroy();
+            self.geometry_system.destroy_resources();
 
             self.per_frame_uniform_buffer.destroy();
             self.device.destroy_descriptor_set_layout(self.per_frame_ubo_set_layout, None);
 
-            for texture in self.textures.iter_mut() {
-                texture.destroy();
-            }
+            // for texture in self.textures.iter_mut() {
+            //     texture.destroy();
+            // }
             self.device.destroy_descriptor_set_layout(self.textures_set_layout, None);
 
             self.device.destroy_descriptor_pool(self.descriptor_pool, None);
