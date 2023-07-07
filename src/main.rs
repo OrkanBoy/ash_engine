@@ -1,11 +1,10 @@
 pub mod renderer;
 pub mod math;
 pub mod input;
-pub mod components;
-pub mod memory;
-pub mod data_structures;
 pub mod camera;
 pub mod geometry;
+pub mod utils;
+pub mod allocator;
 
 use winit::dpi::PhysicalPosition;
 use winit::event::{DeviceEvent, WindowEvent, ElementState};

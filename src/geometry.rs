@@ -1,30 +1,56 @@
 pub struct Vertex {
     pub x: f32, pub y: f32, pub z: f32,
-
-    // r: f32, g: f32, b: f32,
     
-    // u: f32, v: f32,
+    pub u: f32, pub v: f32,
 }
 
 use std::rc::Rc;
-use core::mem::{size_of, align_of};
+use core::mem::size_of;
+use crate::{allocator, utils};
 
 use ash::vk;
 
-use crate::memory::{Allocator, buddy, self};
-
-type GeometryId = usize;
+type GeometryId = u16;
 type Index = u32;
 
 // TODO: configurable
 const VK_INDEX_TYPE: vk::IndexType = vk::IndexType::UINT32;
 
-/// referred by a geometry id from user and used internally for binding that geometry
+/// referred by a geometry id from user and used internally for binding that geometry.
+/// A slice of these is used to quickly iterate and call vkCmdDrawIndexed.
+/// They are also used to deallocate the underlying geometry
 #[derive(Clone)]
 struct Geometry {
     vertex_offset:  i32,
     first_index:    u32,
     index_count:    u32,
+}
+
+impl Default for Geometry {
+    fn default() -> Self {
+        Self { vertex_offset: i32::MIN, first_index: 0, index_count: 0 }
+    }
+}
+
+#[derive(Clone)]
+struct GeometryDealloc {
+    vertex_block_level:     allocator::BlockLevel,
+    vertex_free_tree_index: allocator::FreeTreeIndex,
+    index_block_level:      allocator::BlockLevel,
+    index_free_tree_index:  allocator::FreeTreeIndex,
+}
+
+impl Default for GeometryDealloc {
+    fn default() -> Self {
+        use allocator::{BlockLevel, FreeTreeIndex};
+
+        Self { 
+            vertex_block_level:     BlockLevel::MAX,
+            vertex_free_tree_index: FreeTreeIndex::MAX,
+            index_block_level:      BlockLevel::MAX,
+            index_free_tree_index:  FreeTreeIndex::MAX,
+        }
+    } 
 }
 
 /// Holds static geometry. 
@@ -35,7 +61,9 @@ pub struct GeometrySystem {
     due_vertex_buffer_copies:   Vec<vk::BufferCopy>,
     due_index_buffer_copies:    Vec<vk::BufferCopy>,
     
-    id_to_geometry:             Vec<Option<Geometry>>,
+    id_to_geometry:             Vec<Geometry>,
+    id_to_geometry_dealloc:     Vec<GeometryDealloc>,
+    id_exists:                  Vec<usize>,
     available_ids:              Vec<GeometryId>,
     geometry_count:             usize,
 
@@ -46,8 +74,8 @@ pub struct GeometrySystem {
     staging_buffer:             vk::Buffer,
     staging_memory:             vk::DeviceMemory,
 
-    vertex_allocator:           memory::buddy::BuddyAllocator,
-    index_allocator:            memory::buddy::BuddyAllocator,
+    vertex_allocator:           allocator::Allocator,
+    index_allocator:            allocator::Allocator,
 }
 
 impl GeometrySystem {
@@ -150,20 +178,22 @@ impl GeometrySystem {
         };
 
         let block_levels = 8;
-        let vertex_allocator = unsafe { crate::memory::buddy::BuddyAllocator::new(
+        let vertex_allocator = unsafe { crate::allocator::Allocator::new(
             staging_mapped_ptr,
             vertex_buffer_size as usize,
             block_levels,
         ) };
 
-        let index_allocator = unsafe { crate::memory::buddy::BuddyAllocator::new(
+        let index_allocator = unsafe { crate::allocator::Allocator::new(
             (staging_mapped_ptr as vk::DeviceSize + vertex_buffer_size) as *mut u8,
             vertex_buffer_size as usize,
             block_levels,
         ) };
 
-        let id_to_geometry = vec![None; 100];
-        let available_ids = (0..100).collect::<Vec<_>>();
+        let max_id_count = 100;
+        let id_to_geometry = vec![Default::default(); max_id_count];
+        let id_to_geometry_dealloc = vec![Default::default(); max_id_count];
+        let available_ids = (0..max_id_count as GeometryId).collect::<Vec<_>>();
 
         Self {
             device,
@@ -171,6 +201,8 @@ impl GeometrySystem {
             due_index_buffer_copies: vec![], // TODO: optimize
 
             id_to_geometry,
+            id_to_geometry_dealloc,
+            id_exists: utils::new_bitmask_vec(max_id_count, false),
             available_ids,
             geometry_count: 0,
 
@@ -213,29 +245,29 @@ impl GeometrySystem {
         let vertices_size = vertices.len() * size_of::<Vertex>();
         let indices_size = indices.len() * size_of::<Index>();
 
-        let (vertex_ptr, _) = unsafe { self.vertex_allocator.alloc(
-            vertices_size,
-            0 // ignored for buddy allocator anyways
-        )};
-        let (index_ptr, _) = unsafe { self.index_allocator.alloc(
-            indices_size, 
-            0 // ignored for buddy allocator anyways
-        )};
+        let (vertex_ptr, vertex_block_level, vertex_free_tree_index) = unsafe { self.vertex_allocator.allocate(vertices_size) };
+        let (index_ptr, index_block_level, index_free_tree_index) = unsafe { self.index_allocator.allocate(indices_size) };
 
         unsafe {
             (vertex_ptr as *mut Vertex).copy_from(vertices.as_ptr(), vertices.len());
             (index_ptr as *mut Index).copy_from(indices.as_ptr(), indices.len());
         }
 
-        assert!(self.id_to_geometry[id].is_none());
+        assert!(!utils::get_bit(&self.id_exists, id as usize));
         let vertex_offset = vertex_ptr as vk::DeviceSize - self.vertex_allocator.heap_start as vk::DeviceSize;
         let index_offset = index_ptr as vk::DeviceSize - self.index_allocator.heap_start as vk::DeviceSize;
 
-        self.id_to_geometry[id] = Some(Geometry {
+        self.id_to_geometry[id as usize] = Geometry {
             vertex_offset: vertex_offset as i32,
             first_index: index_offset as u32 / size_of::<u32>() as u32,
             index_count: indices.len() as u32,
-        });
+        };
+        self.id_to_geometry_dealloc[id as usize] = GeometryDealloc {
+            vertex_block_level,
+            vertex_free_tree_index,
+            index_block_level,
+            index_free_tree_index,
+        };
 
         self.due_vertex_buffer_copies.push(vk::BufferCopy{
             src_offset: vertex_offset + 0,
@@ -252,7 +284,6 @@ impl GeometrySystem {
     }
 
     pub fn cmd_upload_geometries(&mut self, command_buffer: vk::CommandBuffer) {
-        assert!(self.due_vertex_buffer_copies.len() != 0 && self.due_index_buffer_copies.len() != 0);
         unsafe {
             self.device.cmd_copy_buffer(
                 command_buffer, 
@@ -273,24 +304,29 @@ impl GeometrySystem {
     }
 
     pub fn destroy_geometry(&mut self, id: GeometryId) {
-        let geometry = self.id_to_geometry[id].as_ref().unwrap();
         self.geometry_count -= 1;
 
         unsafe {
-            self.vertex_allocator.dealloc(
-                (geometry.vertex_offset + self.vertex_allocator.heap_start as i32) as *mut u8, 
+            self.vertex_allocator.deallocate(
+                (self.id_to_geometry[id as usize].vertex_offset + self.vertex_allocator.heap_start as i32) as *mut u8, 
+                self.id_to_geometry_dealloc[id as usize].vertex_block_level,
+                self.id_to_geometry_dealloc[id as usize].vertex_free_tree_index,
             );
-            self.index_allocator.dealloc(
-                (geometry.first_index * size_of::<Index>() as u32 + self.index_allocator.heap_start as u32) as *mut u8, 
+            self.index_allocator.deallocate(
+                (self.id_to_geometry[id as usize].first_index * size_of::<Index>() as u32 + self.index_allocator.heap_start as u32) as *mut u8, 
+                self.id_to_geometry_dealloc[id as usize].index_block_level,
+                self.id_to_geometry_dealloc[id as usize].index_free_tree_index,
             );
         }
 
-        self.id_to_geometry[id] = None;
+        self.id_to_geometry[id as usize] = Default::default();
         self.available_ids.push(id);
     }
 
     pub fn cmd_draw_geometry(&self, command_buffer: vk::CommandBuffer, id: GeometryId) {
-        let geometry = self.id_to_geometry[id].as_ref().unwrap();
+        assert!(utils::get_bit(&self.id_exists, id as usize));
+        let geometry = &self.id_to_geometry[id as usize];
+
         unsafe { self.device.cmd_draw_indexed(
             command_buffer, 
             geometry.index_count, 
