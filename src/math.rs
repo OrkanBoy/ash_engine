@@ -186,7 +186,7 @@ impl ModelMat {
         let two_near_z = 2.0 * near_z;
     
         let proj_r0c0 = two_near_z / aspect_ratio;
-        let proj_r1c1 = two_near_z * near_z;
+        let proj_r1c1 = two_near_z;
         let proj_r2c2 = far_z / (far_z - near_z);
     
         Mat {
