@@ -351,9 +351,13 @@ impl Bivector {
         self.yx * self.yx + self.zy * self.zy + self.xz * self.xz
     }
 
+    /// In R3 the bivector squares to a negative scalar
+    /// hence we can factor the Bivector to a scalar and unit bivector
+    /// and employ Taylor expansion from there without worrying about non-commuting bivectors
+    /// note: in more exotic clifford spaces, the bivectors may not be the only generators
     pub fn exp(&self) -> Rotor {
-        let theta = self.norm_sqr();
-        if theta == 0.0 {
+        let norm_sqr = self.norm_sqr();
+        if norm_sqr == 0.0 {
             return Rotor {
                 _1: 1.0,
                 yx: 0.0,
@@ -361,15 +365,15 @@ impl Bivector {
                 xz: 0.0,
             };
         }
-        let sqrt = theta.sqrt();
-        let c = theta.cos();
-        let s_sqrt = theta.sin() / sqrt;
+        let norm = norm_sqr.sqrt();
+        let cos = norm.cos();
+        let sin_norm = norm.sin() / norm;
 
         Rotor {
-            _1: c,
-            yx: self.yx * s_sqrt,
-            zy: self.zy * s_sqrt,
-            xz: self.xz * s_sqrt,
+            _1: cos,
+            yx: self.yx * sin_norm,
+            zy: self.zy * sin_norm,
+            xz: self.xz * sin_norm,
         }
     }
 }
